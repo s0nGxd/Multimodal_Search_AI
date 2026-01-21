@@ -1,0 +1,26 @@
+# --- 1. Python & Environment ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.env
+
+# --- 2. Large Data & Images ---
+# Ignore the actual images you downloaded (too large for GitHub)
+images/
+# Ignore the raw Unsplash metadata files
+data/
+*.csv*
+*.tsv*
+photos.csv000
+
+# --- 3. Database ---
+# Ignore the local LanceDB database folder
+lancedb_data/
+*.lance/
+
+# --- 4. OS & IDE ---
+.DS_Store
+.vscode/
+.idea/
