@@ -12,21 +12,35 @@ def load_system():
     table = db.open_table("my_images")
     return model, processor, table, device
 
-st.title("Search Engine V2")
+st.title("SEGP G20 Multimodal Search")
 model, processor, table, device = load_system()
 
-query = st.text_input("Search:", "a dog in the park")
+query = st.text_input("Search:", "Mountain")
+
+# Added a slider to control the number of results
+no_result = st.slider("Number of results to show:", min_value=1, max_value=50, value=9)
 
 if query:
+    # Convert text query to vector
     inputs = processor(text=[query], return_tensors="pt", padding=True).to(device)
     with torch.no_grad():
         features = model.get_text_features(**inputs)
         features = features / features.norm(p=2, dim=-1, keepdim=True)
         q_vec = features.cpu().numpy()[0].tolist()
     
-    results = table.search(q_vec).limit(3).to_pandas()
+    # Search results from lancedb
+    results = table.search(q_vec).limit(no_result).to_pandas()
+
+    # Display results
+    st.subheader(f"Found {len(results)} matches")
     
-    cols = st.columns(3)
-    for idx, row in results.iterrows():
-        with cols[idx % 3]:
-            st.image(row['path'], use_container_width=True)
+    if not results.empty:
+        # Create a grid of 3 columns
+        cols = st.columns(3)
+        for idx, row in results.iterrows():
+            # This math places images in the next available column
+            with cols[idx % 3]:
+                st.image(row["path"], use_container_width=True)
+                st.caption(f"File: {row['filename']}")
+    else:
+        st.warning("No results found...")

@@ -42,4 +42,4 @@ if data:
     db.create_table("my_images", data=data, mode="overwrite")
     print(f"Success! {len(data)} images indexed in LanceDB.")
 else:
-    print("No images found. Did you run step 1?")
+    print("No images found. Do you have an image dataset?")
