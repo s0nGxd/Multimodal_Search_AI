@@ -4,7 +4,7 @@ import torch
 from transformers import CLIPModel, CLIPProcessor
 from PIL import Image
 
-# 1. Setup
+# 1. Setup - Models, Locating Files, etc.
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model_id = "openai/clip-vit-base-patch32"
 model = CLIPModel.from_pretrained(model_id).to(device)
@@ -25,7 +25,7 @@ def get_embedding(image_path):
     except:
         return None
 
-# 2. Process
+# 2. Process - give embeddings to each images
 data = []
 print("Generating embeddings...")
 
@@ -37,7 +37,7 @@ for filename in files:
     if vector:
         data.append({"filename": filename, "path": path, "vector": vector})
 
-# 3. Save
+# 3. Save into LanceDB
 if data:
     db.create_table("my_images", data=data, mode="overwrite")
     print(f"Success! {len(data)} images indexed in LanceDB.")

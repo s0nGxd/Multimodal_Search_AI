@@ -7,16 +7,15 @@ from concurrent.futures import ThreadPoolExecutor
 # --- Configuration ---
 TARGET_IMAGES = 200     # Number of images to download for the prototype
 OUTPUT_DIR = "images"   # Folder to save images
-DATA_PATH = "data/raw/unsplash_dataset/" # Update this to point to where your csv000 files are
+DATA_PATH = "data/raw/unsplash_dataset/" # Point to the CSV files location where data is stored
 
 # Ensure output directory exists
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# --- 1. Load the Dataset (Adapted from your snippet) ---
+# 1. Load the Dataset
 print("Loading dataset...")
 
-# We specifically look for the 'photos' file. 
-# Your file is likely named 'photos.csv000', so we search for 'photos.csv*'
+# Locate the CSV file
 files = glob.glob(os.path.join(DATA_PATH, "photos.csv*"))
 
 if not files:
@@ -35,7 +34,7 @@ photos_df = pd.concat(documents, axis=0, ignore_index=True)
 
 print(f"Successfully loaded metadata for {len(photos_df)} images.")
 
-# --- 2. Download Logic ---
+# 2. Download Logic
 def download_image(row):
     try:
         # Get ID and URL from the Unsplash dataframe
@@ -56,7 +55,7 @@ def download_image(row):
         return False
     return False
 
-# --- 3. Execute Download ---
+# 3. Execute Download
 print(f"Downloading first {TARGET_IMAGES} images...")
 
 # Select the first N rows
