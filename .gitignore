@@ -1,0 +1,33 @@
+# System & Dependencies
+.venv/
+node_modules/
+__pycache__/
+.DS_Store
+
+# Secrets & Config
+.env
+.env.local
+
+# Database & Data
+lancedb_db/
+server/lancedb_db/
+server/data/
+data/
+images/
+photos.csv000
+*.csv
+
+# Media
+*.jpg
+*.png
+*.jpeg
+*.webp
+*.gif
+*.tif
+*.bmp
+
+# Planning & Docs (Excluded per request)
+implementation_plan.md
+problem_solution.md
+task.md
+brain/

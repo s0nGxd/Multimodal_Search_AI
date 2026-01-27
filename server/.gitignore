@@ -1,0 +1,11 @@
+.venv/
+images/
+*.jpg
+*.png
+*.jpeg
+*.webp
+*.gif
+*.tif
+*.bmp
+*.csv
+lancedb_db/
