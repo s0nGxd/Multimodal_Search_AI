@@ -1,4 +1,4 @@
-const API_BASE = 'http://localhost:8000/api';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
 
 export interface IngestResult {
     id: string;
@@ -14,7 +14,7 @@ export interface SearchResult {
     score?: number;
 }
 
-export async function searchImages(query: string, k: number = 20, threshold: number = 0.85): Promise<SearchResult[]> {
+export async function searchImages(query: string, k: number = 20, threshold: number = 0.9): Promise<SearchResult[]> {
     const res = await fetch(`${API_BASE}/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

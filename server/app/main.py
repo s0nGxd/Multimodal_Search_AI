@@ -1,35 +1,47 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from contextlib import asynccontextmanager
 import os
+from app.services.persistence_service import restore_from_repo
 
-app = FastAPI(title="SEGP Semantic Search API")
+@asynccontextmanager
+async def lifespan(app):
+    """Startup: restore persisted data from HF Dataset repo."""
+    restore_from_repo()
+    yield
 
-# CORS Setup
-origins = [
-    "http://localhost:3000",  # Next.js frontend
-    "http://127.0.0.1:3000",
-]
+app = FastAPI(title="SEGP Semantic Search API", lifespan=lifespan)
+
+# CORS Setup — configurable for deployment
+# Locally: defaults to localhost:3000
+# Deployed: set ALLOWED_ORIGINS env var to your frontend URL (comma-separated)
+default_origins = "http://localhost:3000,http://127.0.0.1:3000,https://client-nine-xi-31.vercel.app"
+origins = os.getenv("ALLOWED_ORIGINS", default_origins).split(",")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=[o.strip() for o in origins],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Ensure data directory exists
-os.makedirs("data", exist_ok=True)
+# Ensure data directory exists (uses /data for persistent storage on HF Spaces)
+data_dir = os.getenv("DATA_DIR", "data")
+os.makedirs(data_dir, exist_ok=True)
 
 # Mount static files (uploaded images)
-# We will serve files from the 'data' directory at the /images URL path
-app.mount("/images", StaticFiles(directory="data"), name="images")
+app.mount("/images", StaticFiles(directory=data_dir), name="images")
 
 from app.routers import search, upload
 
 app.include_router(search.router, prefix="/api", tags=["Search"])
 app.include_router(upload.router, prefix="/api", tags=["Upload"])
+
+@app.get("/")
+def root():
+    return {"message": "SEGP Semantic Search API", "docs": "/docs", "health": "/health"}
 
 @app.get("/health")
 def health_check():
@@ -37,4 +49,6 @@ def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)
+

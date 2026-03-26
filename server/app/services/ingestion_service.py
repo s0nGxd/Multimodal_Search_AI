@@ -1,36 +1,50 @@
 import os
-import shutil
+import io
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Optional
+
+import requests
+import pandas as pd
 from PIL import Image
 import lancedb
 from lancedb.pydantic import LanceModel, Vector
+
 from .search_service import search_service
 from .caption_service import caption_service
+from .persistence_service import sync_to_repo
 
-# Define Schema (Must match what is used in SearchService/Ingest)
+
 class ImageRecord(LanceModel):
     photo_id: str
     photo_image_url: str
     description: str = ""
     vector: Vector(512)
+    caption_vector: Vector(512)
 
-import requests
-import io
-import pandas as pd
-from typing import List, Optional
+
+def _download_image(photo_id: str, url: str, timeout: int = 10) -> tuple[str, str, Image.Image | None]:
+    try:
+        response = requests.get(url, timeout=timeout)
+        response.raise_for_status()
+        img = Image.open(io.BytesIO(response.content)).convert("RGB")
+        return (photo_id, url, img)
+    except Exception as e:
+        print(f"Skipping {photo_id}: {e}")
+        return (photo_id, url, None)
+
 
 class IngestionService:
     def __init__(self):
-        self.data_dir = Path("data")
+        self.data_dir = Path(os.getenv("DATA_DIR", "data"))
         self.data_dir.mkdir(exist_ok=True)
+        self.backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
 
     def process_upload(self, file_contents: bytes, filename: str):
-        # 1. Save File
         file_path = self.data_dir / filename
         with open(file_path, "wb") as f:
             f.write(file_contents)
-        
-        # 2. Open and Validate Image
+
         try:
             img = Image.open(file_path).convert("RGB")
         except Exception as e:
@@ -38,20 +52,20 @@ class IngestionService:
                 os.remove(file_path)
             raise ValueError(f"Invalid image file: {e}")
 
-        # 3. Embed and Caption Image
         vector = search_service.embed_image(img)
         description = caption_service.generate_caption(img)
-        
-        # 4. Insert into LanceDB
-        photo_url = f"http://localhost:8000/images/{filename}"
+        caption_vector = search_service.embed_text(description)
+
+        photo_url = f"{self.backend_url}/images/{filename}"
         record = ImageRecord(
             photo_id=file_path.stem,
             photo_image_url=photo_url,
             description=description,
-            vector=vector
+            vector=vector,
+            caption_vector=caption_vector,
         )
         self._insert_records([record])
-        
+        sync_to_repo()
         return {"id": file_path.stem, "url": photo_url, "description": description, "status": "indexed"}
 
     def process_url_upload(self, url: str, photo_id: Optional[str] = None):
@@ -64,50 +78,75 @@ class IngestionService:
 
         vector = search_service.embed_image(img)
         description = caption_service.generate_caption(img)
+        caption_vector = search_service.embed_text(description)
         pid = photo_id or f"remote_{hash(url)}"
-        
+
         record = ImageRecord(
             photo_id=pid,
             photo_image_url=url,
             description=description,
-            vector=vector
+            vector=vector,
+            caption_vector=caption_vector,
         )
         self._insert_records([record])
+        sync_to_repo()
         return {"id": pid, "url": url, "description": description, "status": "indexed"}
 
-    def process_bulk_csv(self, csv_path: str, limit: int = 100):
-        # Load CSV
+    def process_bulk_csv(self, csv_path: str, limit: int = 100, generate_captions: bool = False, max_workers: int = 8, batch_size: int = 16):
         try:
-            # The file is tab separated based on head output
             df = pd.read_csv(csv_path, sep='\t', nrows=limit)
         except Exception as e:
             raise ValueError(f"Failed to read CSV: {e}")
 
+        # Phase 1: Download images concurrently
+        print(f"Downloading up to {len(df)} images with {max_workers} threads...")
+        downloaded = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_download_image, str(row['photo_id']), row['photo_image_url']): i
+                for i, row in df.iterrows()
+            }
+            for future in as_completed(futures):
+                photo_id, url, img = future.result()
+                if img is not None:
+                    downloaded.append((photo_id, url, img))
+
+        if not downloaded:
+            return {"processed": 0, "status": "completed"}
+
+        print(f"Downloaded {len(downloaded)} images. Generating embeddings in batches of {batch_size}...")
+
+        # Phase 2: Batch embed all images through CLIP
+        images = [img for _, _, img in downloaded]
+        vectors = search_service.embed_images_batch(images, batch_size=batch_size)
+
+        # Phase 3: Optionally caption (expensive — off by default for bulk)
+        import numpy as np
+        zero_vec = np.zeros(512, dtype="float32")
         records = []
-        for _, row in df.iterrows():
-            photo_id = str(row['photo_id'])
-            image_url = row['photo_image_url']
-            
-            try:
-                # We don't download everything here for speed, 
-                # but if we want vectors, we HAVE to download and embed.
-                # In a real system, this would be a background task.
-                response = requests.get(image_url, timeout=5)
-                img = Image.open(io.BytesIO(response.content)).convert("RGB")
-                vector = search_service.embed_image(img)
-                
-                records.append(ImageRecord(
-                    photo_id=photo_id,
-                    photo_image_url=image_url,
-                    vector=vector
-                ))
-            except Exception as e:
-                print(f"Skipping {photo_id} due to error: {e}")
-                continue
-        
-        if records:
-            self._insert_records(records)
-        
+        for i, (photo_id, url, img) in enumerate(downloaded):
+            description = ""
+            cap_vec = zero_vec
+            if generate_captions:
+                description = caption_service.generate_caption(img)
+                cap_vec = search_service.embed_text(description)
+
+            records.append(ImageRecord(
+                photo_id=photo_id,
+                photo_image_url=url,
+                description=description,
+                vector=vectors[i],
+                caption_vector=cap_vec,
+            ))
+
+        # Phase 4: Insert all records at once
+        print(f"Inserting {len(records)} records into LanceDB...")
+        self._insert_records(records)
+
+        # Phase 5: Build IVF-PQ index if table is large enough
+        self._maybe_create_index()
+
+        sync_to_repo()
         return {"processed": len(records), "status": "completed"}
 
     def _insert_records(self, records: List[ImageRecord]):
@@ -118,5 +157,28 @@ class IngestionService:
         except:
             db.create_table("images", schema=ImageRecord, data=records)
         search_service.refresh_table()
+
+    def _maybe_create_index(self, min_rows: int = 256):
+        try:
+            table = search_service.table
+            if table is None:
+                return
+            row_count = table.count_rows()
+            if row_count < min_rows:
+                print(f"Skipping index creation: {row_count} rows < {min_rows} minimum")
+                return
+            num_partitions = max(2, int(row_count ** 0.5))
+            num_sub_vectors = 16
+            print(f"Building IVF-PQ index: {row_count} rows, {num_partitions} partitions, {num_sub_vectors} sub-vectors...")
+            table.create_index(
+                metric="cosine",
+                num_partitions=num_partitions,
+                num_sub_vectors=num_sub_vectors,
+                replace=True,
+            )
+            print("IVF-PQ index built successfully.")
+        except Exception as e:
+            print(f"Index creation skipped or failed: {e}")
+
 
 ingestion_service = IngestionService()

@@ -11,6 +11,9 @@ export default function Home() {
     const [results, setResults] = useState<SearchResult[]>([]);
     const [loading, setLoading] = useState(false);
     const [hasSearched, setHasSearched] = useState(false);
+    const [resultCount, setResultCount] = useState(20);
+    const [minSimilarity, setMinSimilarity] = useState(0.2);
+    const [showSettings, setShowSettings] = useState(false);
 
     const handleSearch = async (e?: React.FormEvent) => {
         if (e) e.preventDefault();
@@ -18,7 +21,15 @@ export default function Home() {
 
         setLoading(true);
         try {
-            const data = await searchImages(query);
+            // Hybrid search produces similarities from ~0.40 (weak) to 1.0 (exact caption).
+            // The slider's "Min Similarity %" maps to this range:
+            //   slider 0% → floor 0.40 → distance 0.60 (show everything)
+            //   slider 100% → ceil 1.0 → distance 0.0 (only exact matches)
+            const CLIP_FLOOR = 0.40;
+            const CLIP_CEIL = 1.00;
+            const rawSim = CLIP_FLOOR + minSimilarity * (CLIP_CEIL - CLIP_FLOOR);
+            const distanceThreshold = 1 - rawSim;
+            const data = await searchImages(query, resultCount, distanceThreshold);
             setResults(data);
             setHasSearched(true);
         } catch (error) {
@@ -69,32 +80,97 @@ export default function Home() {
                     </motion.div>
 
                     {/* Search Bar */}
-                    <motion.form
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        transition={{ delay: 0.2 }}
-                        onSubmit={handleSearch}
-                        className="relative max-w-2xl mx-auto group"
-                    >
-                        <div className="absolute inset-0 bg-gradient-to-r from-purple-600/20 to-blue-600/20 rounded-2xl blur-xl opacity-0 group-focus-within:opacity-100 transition-opacity" />
-                        <div className="relative flex items-center bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl transition-all">
-                            <Search className="ml-4 w-5 h-5 text-gray-500" />
-                            <input
-                                type="text"
-                                value={query}
-                                onChange={(e) => setQuery(e.target.value)}
-                                placeholder="Describe an image... (e.g. 'a person smiling' or 'sunset over mountains')"
-                                className="w-full bg-transparent border-none focus:ring-0 focus:outline-none py-5 px-4 text-white placeholder-gray-600"
-                            />
+                    <div className="relative max-w-2xl mx-auto group">
+                        <form
+                            onSubmit={handleSearch}
+                            className="relative z-10"
+                        >
+                            <div className="absolute inset-0 bg-gradient-to-r from-purple-600/20 to-blue-600/20 rounded-2xl blur-xl opacity-0 group-focus-within:opacity-100 transition-opacity" />
+                            <div className="relative flex items-center bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl transition-all">
+                                <Search className="ml-4 w-5 h-5 text-gray-500" />
+                                <input
+                                    type="text"
+                                    value={query}
+                                    onChange={(e) => setQuery(e.target.value)}
+                                    placeholder="Describe an image... (e.g. 'a person smiling' or 'sunset over mountains')"
+                                    className="w-full bg-transparent border-none focus:ring-0 focus:outline-none py-5 px-4 text-white placeholder-gray-600"
+                                />
+                                <button
+                                    type="submit"
+                                    disabled={loading}
+                                    className="mr-2 px-6 py-2.5 bg-white text-black font-bold rounded-xl hover:bg-gray-200 transition-all active:scale-95 disabled:opacity-50"
+                                >
+                                    {loading ? <Loader2 className="animate-spin w-5 h-5" /> : "Search"}
+                                </button>
+                            </div>
+                        </form>
+
+                        {/* Settings Toggle */}
+                        <div className="mt-4 flex justify-center">
                             <button
-                                type="submit"
-                                disabled={loading}
-                                className="mr-2 px-6 py-2.5 bg-white text-black font-bold rounded-xl hover:bg-gray-200 transition-all active:scale-95 disabled:opacity-50"
+                                onClick={() => setShowSettings(!showSettings)}
+                                className="text-xs text-gray-500 hover:text-white flex items-center gap-1 transition-colors"
                             >
-                                {loading ? <Loader2 className="animate-spin w-5 h-5" /> : "Search"}
+                                {showSettings ? "Hide Options" : "Advanced Search Options"}
+                                <span className={`transform transition-transform ${showSettings ? 'rotate-180' : ''}`}>▼</span>
                             </button>
                         </div>
-                    </motion.form>
+
+                        {/* Settings Panel */}
+                        <AnimatePresence>
+                            {showSettings && (
+                                <motion.div
+                                    initial={{ opacity: 0, height: 0 }}
+                                    animate={{ opacity: 1, height: 'auto' }}
+                                    exit={{ opacity: 0, height: 0 }}
+                                    className="overflow-hidden"
+                                >
+                                    <div className="bg-white/5 border border-white/5 rounded-xl p-4 mt-2 grid grid-cols-2 gap-6 text-left">
+
+                                        {/* Result Count Control */}
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-2 font-medium">
+                                                Max Results: <span className="text-white">{resultCount}</span>
+                                            </label>
+                                            <input
+                                                type="range"
+                                                min="1"
+                                                max="50"
+                                                value={resultCount}
+                                                onChange={(e) => setResultCount(parseInt(e.target.value))}
+                                                className="w-full h-1.5 bg-white/10 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white"
+                                            />
+                                            <div className="flex justify-between text-[10px] text-gray-600 mt-1">
+                                                <span>1</span>
+                                                <span>50</span>
+                                            </div>
+                                        </div>
+
+                                        {/* Similarity Threshold Control */}
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-2 font-medium">
+                                                Min Similarity: <span className="text-white">{Math.round(minSimilarity * 100)}%</span>
+                                            </label>
+                                            <input
+                                                type="range"
+                                                min="0"
+                                                max="100"
+                                                step="5"
+                                                value={minSimilarity * 100}
+                                                onChange={(e) => setMinSimilarity(parseInt(e.target.value) / 100)}
+                                                className="w-full h-1.5 bg-white/10 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white"
+                                            />
+                                            <div className="flex justify-between text-[10px] text-gray-600 mt-1">
+                                                <span>0%</span>
+                                                <span>Strict</span>
+                                            </div>
+                                        </div>
+
+                                    </div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+                    </div>
                 </div>
 
                 {/* Results Grid */}

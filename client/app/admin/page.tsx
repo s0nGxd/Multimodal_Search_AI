@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Upload, CheckCircle, AlertCircle, Loader2, Database } from "lucide-react";
+import { Upload, CheckCircle, AlertCircle, Loader2, Database, ArrowLeft } from "lucide-react";
+import Link from "next/link";
 import { uploadImage, bulkIngest, ingestViaUrl } from "@/lib/api";
 
 export default function AdminPage() {
@@ -106,6 +107,15 @@ export default function AdminPage() {
     return (
         <div className="min-h-screen p-6 md:p-12 bg-black text-white selection:bg-purple-500/30">
             <div className="max-w-5xl mx-auto">
+                <div className="mb-6">
+                    <Link
+                        href="/"
+                        className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 text-sm font-medium hover:bg-white/10 transition-all text-gray-400 hover:text-white"
+                    >
+                        <ArrowLeft className="w-4 h-4" />
+                        Back to Search
+                    </Link>
+                </div>
                 <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-12 gap-4">
                     <div>
                         <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white via-purple-300 to-blue-300">
