@@ -38,7 +38,6 @@ class IngestionService:
     def __init__(self):
         self.data_dir = Path(os.getenv("DATA_DIR", "data"))
         self.data_dir.mkdir(exist_ok=True)
-        self.backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
 
     def process_upload(self, file_contents: bytes, filename: str):
         file_path = self.data_dir / filename
@@ -56,7 +55,7 @@ class IngestionService:
         description = caption_service.generate_caption(img)
         caption_vector = search_service.embed_text(description)
 
-        photo_url = f"{self.backend_url}/images/{filename}"
+        photo_url = f"/images/{filename}"
         record = ImageRecord(
             photo_id=file_path.stem,
             photo_image_url=photo_url,

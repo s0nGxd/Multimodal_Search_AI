@@ -1,7 +1,10 @@
+import os
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 from app.services.search_service import search_service
+
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 router = APIRouter()
 
@@ -28,6 +31,29 @@ class SearchResult(BaseModel):
     description: Optional[str] = None
     score: float
 
+@router.get("/images/all")
+async def list_all_images():
+    try:
+        if search_service.table is None:
+            search_service.refresh_table()
+            if search_service.table is None:
+                return []
+        df = search_service.table.to_pandas()
+        results = []
+        for _, row in df.iterrows():
+            url = row["photo_image_url"]
+            if url.startswith("/images/"):
+                url = f"{BACKEND_URL}{url}"
+            results.append({
+                "photo_id": row["photo_id"],
+                "photo_image_url": url,
+                "description": row.get("description", ""),
+            })
+        return results
+    except Exception as e:
+        print(f"List images error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/search", response_model=List[SearchResult])
 async def search_images(req: SearchRequest):
     try:
@@ -37,9 +63,13 @@ async def search_images(req: SearchRequest):
             dist = r.get("_distance", 1.0)
             score = rescale_clip_score(dist)
 
+            url = r["photo_image_url"]
+            if url.startswith("/images/"):
+                url = f"{BACKEND_URL}{url}"
+
             response.append({
                 "photo_id": r["photo_id"],
-                "photo_image_url": r["photo_image_url"],
+                "photo_image_url": url,
                 "description": r.get("description", ""),
                 "score": float(score)
             })

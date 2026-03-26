@@ -54,6 +54,12 @@ export async function ingestViaUrl(url: string, photo_id?: string) {
     return res.json();
 }
 
+export async function listAllImages(): Promise<SearchResult[]> {
+    const res = await fetch(`${API_BASE}/images/all`);
+    if (!res.ok) throw new Error('Failed to fetch images');
+    return res.json();
+}
+
 export async function bulkIngest(limit: number = 50) {
     const res = await fetch(`${API_BASE}/ingest/bulk`, {
         method: 'POST',

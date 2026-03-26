@@ -2,9 +2,9 @@
 
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Upload, CheckCircle, AlertCircle, Loader2, Database, ArrowLeft } from "lucide-react";
+import { Upload, CheckCircle, AlertCircle, Loader2, Database, ArrowLeft, Image as ImageIcon } from "lucide-react";
 import Link from "next/link";
-import { uploadImage, bulkIngest, ingestViaUrl } from "@/lib/api";
+import { uploadImage, bulkIngest, ingestViaUrl, listAllImages, SearchResult } from "@/lib/api";
 
 export default function AdminPage() {
     const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -16,8 +16,24 @@ export default function AdminPage() {
     const [message, setMessage] = useState("");
     const [isBulkIndexing, setIsBulkIndexing] = useState(false);
 
-    const [activeTab, setActiveTab] = useState<"file" | "url" | "bulk">("file");
+    const [activeTab, setActiveTab] = useState<"file" | "url" | "bulk" | "gallery">("file");
     const [imageUrl, setImageUrl] = useState("");
+    const [allImages, setAllImages] = useState<SearchResult[]>([]);
+    const [loadingImages, setLoadingImages] = useState(false);
+    const [focusedImage, setFocusedImage] = useState<SearchResult | null>(null);
+
+    const fetchAllImages = async () => {
+        setLoadingImages(true);
+        try {
+            const images = await listAllImages();
+            setAllImages(images);
+        } catch (e: any) {
+            setStatus("error");
+            setMessage(e.message || "Failed to fetch images");
+        } finally {
+            setLoadingImages(false);
+        }
+    };
 
     const handleLogin = (e: React.FormEvent) => {
         e.preventDefault();
@@ -137,7 +153,8 @@ export default function AdminPage() {
                             {[
                                 { id: "file", label: "File Upload", icon: Upload },
                                 { id: "url", label: "Remote URL", icon: Database },
-                                { id: "bulk", label: "Bulk Ingest", icon: Database }
+                                { id: "bulk", label: "Bulk Ingest", icon: Database },
+                                { id: "gallery", label: "All Images", icon: ImageIcon }
                             ].map((tab) => (
                                 <button
                                     key={tab.id}
@@ -251,6 +268,52 @@ export default function AdminPage() {
                                 </motion.div>
                             )}
 
+                            {activeTab === "gallery" && (
+                                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <h3 className="text-lg font-medium">All Indexed Images</h3>
+                                            <p className="text-sm text-gray-500">{allImages.length} images in database</p>
+                                        </div>
+                                        <button
+                                            onClick={fetchAllImages}
+                                            disabled={loadingImages}
+                                            className="px-4 py-2 bg-white/10 border border-white/10 rounded-xl text-sm font-medium hover:bg-white/15 transition-all disabled:opacity-50"
+                                        >
+                                            {loadingImages ? <Loader2 className="animate-spin w-4 h-4" /> : "Refresh"}
+                                        </button>
+                                    </div>
+                                    {allImages.length === 0 && !loadingImages && (
+                                        <div className="text-center py-12">
+                                            <ImageIcon className="w-10 h-10 text-gray-700 mx-auto mb-3" />
+                                            <p className="text-gray-500 text-sm">Click Refresh to load indexed images</p>
+                                        </div>
+                                    )}
+                                    <div className="grid grid-cols-2 md:grid-cols-3 gap-4 max-h-[60vh] overflow-y-auto pr-2">
+                                        {allImages.map((img) => (
+                                            <div
+                                                key={img.photo_id}
+                                                className="group relative rounded-xl overflow-hidden border border-white/5 bg-white/5 cursor-pointer"
+                                                onClick={() => setFocusedImage(img)}
+                                            >
+                                                <img
+                                                    src={img.photo_image_url}
+                                                    alt={img.photo_id}
+                                                    className="w-full h-40 object-cover"
+                                                    loading="lazy"
+                                                />
+                                                <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-3">
+                                                    <p className="text-[10px] text-gray-400 font-mono truncate">{img.photo_id}</p>
+                                                    {img.description && (
+                                                        <p className="text-[11px] text-white/80 line-clamp-2 mt-1 italic">"{img.description}"</p>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </motion.div>
+                            )}
+
                             {/* Status Feed */}
                             <AnimatePresence>
                                 {status !== "idle" && (
@@ -308,6 +371,48 @@ export default function AdminPage() {
                     </div>
                 </div>
             </div>
+
+            {/* Image Lightbox */}
+            <AnimatePresence>
+                {focusedImage && (
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-6"
+                        onClick={() => setFocusedImage(null)}
+                    >
+                        <motion.div
+                            initial={{ scale: 0.9, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            exit={{ scale: 0.9, opacity: 0 }}
+                            transition={{ type: "spring", damping: 25, stiffness: 300 }}
+                            className="relative max-w-4xl max-h-[85vh] w-full flex flex-col items-center"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <img
+                                src={focusedImage.photo_image_url}
+                                alt={focusedImage.photo_id}
+                                className="max-h-[70vh] w-auto rounded-2xl object-contain shadow-2xl"
+                            />
+                            <div className="mt-4 w-full max-w-2xl text-center space-y-2">
+                                <p className="text-xs text-gray-500 font-mono">{focusedImage.photo_id}</p>
+                                {focusedImage.description && (
+                                    <p className="text-sm text-white/90 bg-white/5 border border-white/10 rounded-xl px-4 py-3 italic">
+                                        "{focusedImage.description}"
+                                    </p>
+                                )}
+                            </div>
+                            <button
+                                onClick={() => setFocusedImage(null)}
+                                className="absolute top-2 right-2 w-8 h-8 flex items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20 transition-all text-sm"
+                            >
+                                ✕
+                            </button>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
         </div>
     );
 }

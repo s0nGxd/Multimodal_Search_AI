@@ -1,3 +1,4 @@
+import os
 import shutil
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from app.services.ingestion_service import ingestion_service
@@ -5,6 +6,8 @@ from app.services.search_service import search_service
 
 from pydantic import BaseModel
 from typing import Optional
+
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 router = APIRouter()
 
@@ -22,6 +25,8 @@ async def upload_image(file: UploadFile = File(...)):
     try:
         contents = await file.read()
         result = ingestion_service.process_upload(contents, file.filename)
+        if result.get("url", "").startswith("/images/"):
+            result["url"] = f"{BACKEND_URL}{result['url']}"
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

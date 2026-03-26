@@ -14,6 +14,7 @@ export default function Home() {
     const [resultCount, setResultCount] = useState(20);
     const [minSimilarity, setMinSimilarity] = useState(0.2);
     const [showSettings, setShowSettings] = useState(false);
+    const [focusedImage, setFocusedImage] = useState<SearchResult | null>(null);
 
     const handleSearch = async (e?: React.FormEvent) => {
         if (e) e.preventDefault();
@@ -185,6 +186,7 @@ export default function Home() {
                                     exit={{ opacity: 0 }}
                                     layout
                                     className="break-inside-avoid relative group rounded-xl overflow-hidden cursor-pointer"
+                                    onClick={() => setFocusedImage(img)}
                                 >
                                     <img
                                         src={img.photo_image_url}
@@ -220,6 +222,54 @@ export default function Home() {
                     )}
                 </div>
             </div>
+            {/* Image Lightbox */}
+            <AnimatePresence>
+                {focusedImage && (
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-6"
+                        onClick={() => setFocusedImage(null)}
+                    >
+                        <motion.div
+                            initial={{ scale: 0.9, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            exit={{ scale: 0.9, opacity: 0 }}
+                            transition={{ type: "spring", damping: 25, stiffness: 300 }}
+                            className="relative max-w-4xl max-h-[85vh] w-full flex flex-col items-center"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <img
+                                src={focusedImage.photo_image_url}
+                                alt={focusedImage.photo_id}
+                                className="max-h-[70vh] w-auto rounded-2xl object-contain shadow-2xl"
+                            />
+                            <div className="mt-4 w-full max-w-2xl text-center space-y-2">
+                                <div className="flex items-center justify-center gap-3">
+                                    <p className="text-xs text-gray-500 font-mono">{focusedImage.photo_id}</p>
+                                    {focusedImage.score && (
+                                        <span className="text-xs bg-purple-500/30 border border-purple-500/30 px-2 py-0.5 rounded text-purple-300 font-medium">
+                                            {Math.round(focusedImage.score * 100)}% Match
+                                        </span>
+                                    )}
+                                </div>
+                                {focusedImage.description && (
+                                    <p className="text-sm text-white/90 bg-white/5 border border-white/10 rounded-xl px-4 py-3 italic">
+                                        "{focusedImage.description}"
+                                    </p>
+                                )}
+                            </div>
+                            <button
+                                onClick={() => setFocusedImage(null)}
+                                className="absolute top-2 right-2 w-8 h-8 flex items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20 transition-all text-sm"
+                            >
+                                ✕
+                            </button>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
         </main>
     );
 }
