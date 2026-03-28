@@ -9,10 +9,13 @@ import pandas as pd
 from PIL import Image
 import lancedb
 from lancedb.pydantic import LanceModel, Vector
+from dotenv import load_dotenv
 
 from .search_service import search_service
 from .caption_service import caption_service
 from .persistence_service import sync_to_repo
+
+load_dotenv()
 
 # Must match the embedding dimension of the configured model.
 # SigLIP base-patch16-256 (default) → 768. CLIP base-patch32 → 512.
