@@ -255,7 +255,7 @@ export default function AdminPage() {
                                     <div className="p-6 rounded-2xl bg-blue-500/5 border border-blue-500/10 flex items-start gap-4">
                                         <Database className="w-5 h-5 text-blue-400 mt-1" />
                                         <div className="text-sm leading-relaxed text-gray-400">
-                                            This process will download imagery and generate CLIP vectors for each record. Performance depends on network speed.
+                                            This process will download imagery and generate SigLIP vectors for each record. Performance depends on network speed.
                                         </div>
                                     </div>
                                     <button
@@ -339,7 +339,7 @@ export default function AdminPage() {
                             <div className="space-y-6">
                                 <div className="flex justify-between items-center group">
                                     <span className="text-gray-500 group-hover:text-gray-400 transition-colors">Core Model</span>
-                                    <span className="text-sm font-mono bg-white/5 px-2 py-1 rounded">CLIP-ViT</span>
+                                    <span className="text-sm font-mono bg-white/5 px-2 py-1 rounded">SigLIP-ViT</span>
                                 </div>
                                 <div className="flex justify-between items-center group">
                                     <span className="text-gray-500 group-hover:text-gray-400 transition-colors">Vector Store</span>
@@ -347,7 +347,7 @@ export default function AdminPage() {
                                 </div>
                                 <div className="flex justify-between items-center group">
                                     <span className="text-gray-500 group-hover:text-gray-400 transition-colors">Dimension</span>
-                                    <span className="text-sm font-mono">512px v</span>
+                                    <span className="text-sm font-mono">768</span>
                                 </div>
                             </div>
 

@@ -14,13 +14,17 @@ from .search_service import search_service
 from .caption_service import caption_service
 from .persistence_service import sync_to_repo
 
+# Must match the embedding dimension of the configured model.
+# SigLIP base-patch16-256 (default) → 768. CLIP base-patch32 → 512.
+EMBED_DIM = int(os.getenv("EMBED_DIM", "768"))
+
 
 class ImageRecord(LanceModel):
     photo_id: str
     photo_image_url: str
     description: str = ""
-    vector: Vector(512)
-    caption_vector: Vector(512)
+    vector: Vector(EMBED_DIM)
+    caption_vector: Vector(EMBED_DIM)
 
 
 def _download_image(photo_id: str, url: str, timeout: int = 10) -> tuple[str, str, Image.Image | None]:
@@ -153,8 +157,16 @@ class IngestionService:
         try:
             table = db.open_table("images")
             table.add(records)
-        except:
-            db.create_table("images", schema=ImageRecord, data=records)
+        except Exception:
+            table = db.create_table("images", schema=ImageRecord, data=records)
+
+        # Build/refresh BM25 full-text search index on the description field
+        # so that keyword queries (Channel 3) can find exact matches.
+        try:
+            table.create_fts_index("description", replace=True)
+        except Exception as e:
+            print(f"FTS index creation skipped: {e}")
+
         search_service.refresh_table()
 
     def _maybe_create_index(self, min_rows: int = 256):

@@ -1,33 +1,92 @@
-# System & Dependencies
+# ============================================================
+# ROOT .gitignore — covers the entire monorepo
+# ============================================================
+
+# ── Python: Virtual Environments ────────────────────────────
 .venv/
-node_modules/
+.venv2/
+venv/
+venv*/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# ── Python: Bytecode & Cache ─────────────────────────────────
 __pycache__/
-.DS_Store
+*.py[cod]
+*.pyo
+*.pyd
+.Python
 
-# Secrets & Config
-.env
-.env.local
+# ── Python: Testing & Coverage ───────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 
-# Database & Data
+# ── Node.js / Next.js ────────────────────────────────────────
+node_modules/
+.next/
+out/
+.cache/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── Database & Vector Store ───────────────────────────────────
 lancedb_db/
 server/lancedb_db/
+*.lance/
+*.db
+*.sqlite3
+
+# ── Uploaded / Ingested Images ───────────────────────────────
 server/data/
 data/
 images/
-photos.csv000
-*.csv
-
-# Media
 *.jpg
-*.png
 *.jpeg
+*.png
 *.webp
 *.gif
 *.tif
+*.tiff
 *.bmp
 
-# Planning & Docs (Excluded per request)
-implementation_plan.md
-problem_solution.md
-task.md
-brain/
+# ── Dataset Files ─────────────────────────────────────────────
+*.csv
+*.tsv
+*.parquet
+*.arrow
+photos.csv000
+
+# ── Secrets & Environment ─────────────────────────────────────
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+# (keep .env.example — it documents required vars without exposing values)
+
+# ── OS & Editor Junk ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/settings.json
+.vscode/launch.json
+
+# ── Jupyter Notebooks ─────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── HuggingFace Model Cache (can be very large) ───────────────
+~/.cache/huggingface/
+.cache/

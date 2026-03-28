@@ -22,13 +22,13 @@ export default function Home() {
 
         setLoading(true);
         try {
-            // Hybrid search produces similarities from ~0.40 (weak) to 1.0 (exact caption).
+            // Hybrid search (SigLIP + BM25) produces similarities from ~0.15 (weak) to 1.0 (exact).
             // The slider's "Min Similarity %" maps to this range:
-            //   slider 0% → floor 0.40 → distance 0.60 (show everything)
+            //   slider 0% → floor 0.15 → distance 0.85 (show everything)
             //   slider 100% → ceil 1.0 → distance 0.0 (only exact matches)
-            const CLIP_FLOOR = 0.40;
-            const CLIP_CEIL = 1.00;
-            const rawSim = CLIP_FLOOR + minSimilarity * (CLIP_CEIL - CLIP_FLOOR);
+            const SIM_FLOOR = 0.15;
+            const SIM_CEIL = 1.00;
+            const rawSim = SIM_FLOOR + minSimilarity * (SIM_CEIL - SIM_FLOOR);
             const distanceThreshold = 1 - rawSim;
             const data = await searchImages(query, resultCount, distanceThreshold);
             setResults(data);
@@ -75,7 +75,7 @@ export default function Home() {
                             Find anything <br /> in your images.
                         </h1>
                         <p className="text-gray-400 text-lg max-w-xl mx-auto">
-                            Natural language search powered by CLIP & LanceDB.
+                            Natural language search powered by SigLIP & LanceDB.
                             Search by concepts, emotions, or objects.
                         </p>
                     </motion.div>

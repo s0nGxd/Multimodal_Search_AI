@@ -30,5 +30,6 @@ passlib[bcrypt]>=1.7.4
 python-dotenv>=1.0.1
 requests
 huggingface-hub>=0.20.0
+sentencepiece
 
 
