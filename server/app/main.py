@@ -34,8 +34,14 @@ app.add_middleware(
 data_dir = os.getenv("DATA_DIR", "data")
 os.makedirs(data_dir, exist_ok=True)
 
-# Mount static files (uploaded images)
-app.mount("/images", StaticFiles(directory=data_dir), name="images")
+class CORSStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        return response
+
+# Mount static files (uploaded images) with CORS injection
+app.mount("/images", CORSStaticFiles(directory=data_dir), name="images")
 
 from app.routers import search, upload
 

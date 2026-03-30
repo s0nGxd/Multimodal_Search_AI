@@ -25,6 +25,8 @@ EMBED_DIM = int(os.getenv("EMBED_DIM", "768"))
 class ImageRecord(LanceModel):
     photo_id: str
     photo_image_url: str
+    video_url: str = ""
+    timestamp: float = 0.0
     description: str = ""
     vector: Vector(EMBED_DIM)
     caption_vector: Vector(EMBED_DIM)
@@ -51,6 +53,14 @@ class IngestionService:
         with open(file_path, "wb") as f:
             f.write(file_contents)
 
+        import mimetypes
+        mime_type, _ = mimetypes.guess_type(filename)
+        ext = Path(filename).suffix.lower()
+        is_video = (mime_type and mime_type.startswith("video/")) or ext in [".mp4", ".mov", ".avi", ".webm", ".mkv"]
+
+        if is_video:
+            return self._process_video_upload(file_path, filename)
+
         try:
             img = Image.open(file_path).convert("RGB")
         except Exception as e:
@@ -73,6 +83,65 @@ class IngestionService:
         self._insert_records([record])
         sync_to_repo()
         return {"id": file_path.stem, "url": photo_url, "description": description, "status": "indexed"}
+
+    def _process_video_upload(self, file_path: Path, filename: str):
+        import cv2
+        cap = cv2.VideoCapture(str(file_path))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            fps = 30
+        
+        frames_to_extract = []
+        frame_interval = int(fps * 2) # 1 frame every 2 seconds
+        
+        count = 0
+        success, frame = cap.read()
+        while success:
+            if count % frame_interval == 0:
+                frames_to_extract.append((count, frame))
+            success, frame = cap.read()
+            count += 1
+        cap.release()
+        
+        if not frames_to_extract:
+            if file_path.exists():
+                os.remove(file_path)
+            raise ValueError("Could not extract any frames from the video")
+            
+        records = []
+        for frame_idx, frame_data in frames_to_extract:
+            frame_rgb = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+            
+            frame_filename = f"{file_path.stem}_frame_{frame_idx}.jpg"
+            frame_path = self.data_dir / frame_filename
+            img.save(frame_path)
+            
+            vector = search_service.embed_image(img)
+            description = caption_service.generate_caption(img)
+            caption_vector = search_service.embed_text(description)
+            
+            photo_url = f"/images/{frame_filename}"
+            records.append(ImageRecord(
+                photo_id=f"{file_path.stem}_frame_{frame_idx}",
+                photo_image_url=photo_url,
+                video_url=f"/images/{filename}",
+                timestamp=float(frame_idx) / float(fps),
+                description=description,
+                vector=vector,
+                caption_vector=caption_vector,
+            ))
+            
+        if records:
+            self._insert_records(records)
+            sync_to_repo()
+            
+        return {
+            "id": file_path.stem, 
+            "url": f"/images/{filename}", 
+            "description": f"Video indexed with {len(records)} frames", 
+            "status": "indexed"
+        }
 
     def process_url_upload(self, url: str, photo_id: Optional[str] = None):
         try:

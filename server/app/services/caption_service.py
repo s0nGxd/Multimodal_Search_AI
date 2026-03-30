@@ -21,7 +21,7 @@ class CaptionService:
 
         print(f"Loading BLIP model (lazy): {self.model_name} on {self.device}")
         self.processor = BlipProcessor.from_pretrained(self.model_name)
-        self.model = BlipForConditionalGeneration.from_pretrained(self.model_name).to(self.device)
+        self.model = BlipForConditionalGeneration.from_pretrained(self.model_name, use_safetensors=True).to(self.device)
         self.model.eval()
         self._initialized = True
 

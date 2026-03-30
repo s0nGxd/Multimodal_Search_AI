@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Search, Image as ImageIcon, Sparkles, Loader2, ArrowRight } from "lucide-react";
+import { Search, Image as ImageIcon, Sparkles, Loader2, ArrowRight, Play } from "lucide-react";
 import Link from "next/link";
-import { searchImages, SearchResult } from "@/lib/api";
+import { searchImages, SearchResult, detectObject, getVideoFrames, VideoFrame } from "@/lib/api";
 
 export default function Home() {
     const [query, setQuery] = useState("");
@@ -15,6 +15,85 @@ export default function Home() {
     const [minSimilarity, setMinSimilarity] = useState(0.2);
     const [showSettings, setShowSettings] = useState(false);
     const [focusedImage, setFocusedImage] = useState<SearchResult | null>(null);
+    const [bbox, setBbox] = useState<[number, number, number, number] | null>(null);
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const lastDetectTime = useRef<number>(0);
+    const [isDetecting, setIsDetecting] = useState(false);
+    const [videoFrames, setVideoFrames] = useState<VideoFrame[]>([]);
+    const [currentDescription, setCurrentDescription] = useState("");
+
+    useEffect(() => {
+        if (focusedImage) {
+            setBbox(null);
+            setCurrentDescription(focusedImage.description || "");
+            
+            if (focusedImage.video_url) {
+                // Preload frame texts
+                getVideoFrames(focusedImage.video_url).then(setVideoFrames).catch(console.error);
+            } else {
+                setVideoFrames([]);
+            }
+
+            if (query && hasSearched) {
+                lastDetectTime.current = 0;
+                detectObject(focusedImage.photo_image_url, query)
+                    .then(res => setBbox(res.box))
+                    .catch(console.error);
+            }
+        }
+    }, [focusedImage, query, hasSearched]);
+
+    const handleTimeUpdate = async () => {
+        const video = videoRef.current;
+        if (!video) return;
+
+        const now = video.currentTime;
+
+        // Sync text description instantly without waiting for detection loop
+        if (videoFrames.length > 0) {
+            let closest = videoFrames[0];
+            for (const f of videoFrames) {
+                if (f.timestamp <= now) closest = f;
+                else break;
+            }
+            if (closest && closest.description !== currentDescription) {
+                setCurrentDescription(closest.description);
+            }
+        }
+
+        if (isDetecting || !query || !focusedImage) return;
+
+        // Broadcast a detection request roughly every 1 second of playback change
+        if (Math.abs(now - lastDetectTime.current) >= 1.0) {
+            lastDetectTime.current = now;
+            setIsDetecting(true);
+
+            try {
+                const canvas = document.createElement("canvas");
+                // Cap resolution at 800px for lightning-fast network transmission & decoding
+                const MAX_WIDTH = 800;
+                const scale = Math.min(1.0, MAX_WIDTH / video.videoWidth);
+                canvas.width = video.videoWidth * scale;
+                canvas.height = video.videoHeight * scale;
+                
+                const ctx = canvas.getContext("2d");
+                if (ctx && canvas.width > 0) {
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    const base64Image = canvas.toDataURL("image/jpeg", 0.5);
+                    const result = await detectObject(focusedImage.photo_image_url, query, base64Image);
+                    if (result && result.box) {
+                        setBbox(result.box);
+                    } else {
+                        setBbox(null);
+                    }
+                }
+            } catch (err) {
+                console.error("Live detection failed:", err);
+            } finally {
+                setIsDetecting(false);
+            }
+        }
+    };
 
     const handleSearch = async (e?: React.FormEvent) => {
         if (e) e.preventDefault();
@@ -22,15 +101,7 @@ export default function Home() {
 
         setLoading(true);
         try {
-            // Hybrid search (SigLIP + BM25) produces similarities from ~0.15 (weak) to 1.0 (exact).
-            // The slider's "Min Similarity %" maps to this range:
-            //   slider 0% → floor 0.15 → distance 0.85 (show everything)
-            //   slider 100% → ceil 1.0 → distance 0.0 (only exact matches)
-            const SIM_FLOOR = 0.15;
-            const SIM_CEIL = 1.00;
-            const rawSim = SIM_FLOOR + minSimilarity * (SIM_CEIL - SIM_FLOOR);
-            const distanceThreshold = 1 - rawSim;
-            const data = await searchImages(query, resultCount, distanceThreshold);
+            const data = await searchImages(query, resultCount, minSimilarity);
             setResults(data);
             setHasSearched(true);
         } catch (error) {
@@ -193,6 +264,13 @@ export default function Home() {
                                         alt={img.photo_id}
                                         className="w-full h-auto object-cover transform transition-transform duration-500 group-hover:scale-110"
                                     />
+                                    {img.video_url && (
+                                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+                                            <div className="w-12 h-12 bg-black/50 rounded-full flex items-center justify-center backdrop-blur-md">
+                                                <Play className="w-5 h-5 text-white ml-1" />
+                                            </div>
+                                        </div>
+                                    )}
                                     <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
                                         <div className="flex justify-between items-center mb-1.5">
                                             <p className="text-[10px] text-gray-400 font-mono truncate">{img.photo_id}</p>
@@ -240,11 +318,43 @@ export default function Home() {
                             className="relative max-w-4xl max-h-[85vh] w-full flex flex-col items-center"
                             onClick={(e) => e.stopPropagation()}
                         >
-                            <img
-                                src={focusedImage.photo_image_url}
-                                alt={focusedImage.photo_id}
-                                className="max-h-[70vh] w-auto rounded-2xl object-contain shadow-2xl"
-                            />
+                            <div className="relative inline-flex items-center justify-center max-h-[70vh] rounded-2xl overflow-hidden shadow-2xl bg-black/50">
+                                {focusedImage.video_url ? (
+                                    <video
+                                        ref={videoRef}
+                                        src={focusedImage.video_url}
+                                        crossOrigin="anonymous"
+                                        controls
+                                        autoPlay
+                                        className="max-h-[70vh] w-auto"
+                                        onLoadedMetadata={(e) => {
+                                            if (focusedImage.timestamp) {
+                                                e.currentTarget.currentTime = focusedImage.timestamp;
+                                                lastDetectTime.current = focusedImage.timestamp;
+                                            }
+                                        }}
+                                        onTimeUpdate={handleTimeUpdate}
+                                    />
+                                ) : (
+                                    <img
+                                        src={focusedImage.photo_image_url}
+                                        alt={focusedImage.photo_id}
+                                        className="max-h-[70vh] w-auto"
+                                    />
+                                )}
+                                {bbox && (
+                                    <div
+                                        className="absolute border-[3px] border-red-500 bg-red-500/10 pointer-events-none rounded sm:border-4 transition-all duration-1000 ease-out"
+                                        style={{
+                                            left: `${bbox[0] * 100}%`,
+                                            top: `${bbox[1] * 100}%`,
+                                            width: `${(bbox[2] - bbox[0]) * 100}%`,
+                                            height: `${(bbox[3] - bbox[1]) * 100}%`,
+                                            boxShadow: "0 0 15px rgba(239, 68, 68, 0.5)"
+                                        }}
+                                    />
+                                )}
+                            </div>
                             <div className="mt-4 w-full max-w-2xl text-center space-y-2">
                                 <div className="flex items-center justify-center gap-3">
                                     <p className="text-xs text-gray-500 font-mono">{focusedImage.photo_id}</p>
@@ -254,9 +364,9 @@ export default function Home() {
                                         </span>
                                     )}
                                 </div>
-                                {focusedImage.description && (
+                                {currentDescription && (
                                     <p className="text-sm text-white/90 bg-white/5 border border-white/10 rounded-xl px-4 py-3 italic">
-                                        "{focusedImage.description}"
+                                        "{currentDescription}"
                                     </p>
                                 )}
                             </div>

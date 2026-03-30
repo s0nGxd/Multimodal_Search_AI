@@ -1,7 +1,9 @@
 # Core AI/ML
 transformers>=4.44.0
-# NOTE: torch and torchvision are installed via Dockerfile with CPU-only variant
-# to reduce image size. For local development, install them separately:
+safetensors>=0.4.0
+# For GPU acceleration (Nvidia), install torch/torchvision via:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# For CPU only:
 #   pip install torch torchvision
 torch>=2.3.0
 torchvision>=0.18.0
@@ -31,5 +33,6 @@ python-dotenv>=1.0.1
 requests
 huggingface-hub>=0.20.0
 sentencepiece
+opencv-python-headless>=4.9.0
 
 

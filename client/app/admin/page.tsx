@@ -2,9 +2,9 @@
 
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Upload, CheckCircle, AlertCircle, Loader2, Database, ArrowLeft, Image as ImageIcon, X, FileImage } from "lucide-react";
+import { Upload, CheckCircle, AlertCircle, Loader2, Database, ArrowLeft, Image as ImageIcon, X, FileImage, Play } from "lucide-react";
 import Link from "next/link";
-import { uploadImage, bulkIngest, ingestViaUrl, listAllImages, SearchResult } from "@/lib/api";
+import { uploadImage, bulkIngest, ingestViaUrl, listAllImages, SearchResult, getVideoFrames, VideoFrame } from "@/lib/api";
 
 export default function AdminPage() {
     const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -23,6 +23,19 @@ export default function AdminPage() {
     const [allImages, setAllImages] = useState<SearchResult[]>([]);
     const [loadingImages, setLoadingImages] = useState(false);
     const [focusedImage, setFocusedImage] = useState<SearchResult | null>(null);
+    const [videoFrames, setVideoFrames] = useState<VideoFrame[]>([]);
+    const [currentDescription, setCurrentDescription] = useState("");
+
+    useEffect(() => {
+        if (focusedImage) {
+            setCurrentDescription(focusedImage.description || "");
+            if (focusedImage.video_url) {
+                getVideoFrames(focusedImage.video_url).then(setVideoFrames).catch(console.error);
+            } else {
+                setVideoFrames([]);
+            }
+        }
+    }, [focusedImage]);
 
     const fetchAllImages = async () => {
         setLoadingImages(true);
@@ -53,10 +66,10 @@ export default function AdminPage() {
     };
 
     const addFilesToQueue = (newFiles: File[]) => {
-        const imageFiles = newFiles.filter(f => f.type.startsWith("image/"));
+        const mediaFiles = newFiles.filter(f => f.type.startsWith("image/") || f.type.startsWith("video/"));
         setFileQueue(prev => [
             ...prev,
-            ...imageFiles.map(f => ({ file: f, status: "pending" as const, message: "" }))
+            ...mediaFiles.map(f => ({ file: f, status: "pending" as const, message: "" }))
         ]);
     };
 
@@ -108,7 +121,7 @@ export default function AdminPage() {
         setIsUploading(false);
         if (errorCount === 0) {
             setStatus("success");
-            setMessage(`Successfully indexed ${successCount} image${successCount !== 1 ? "s" : ""}.`);
+            setMessage(`Successfully indexed ${successCount} file${successCount !== 1 ? "s" : ""}.`);
         } else {
             setStatus("error");
             setMessage(`${successCount} indexed, ${errorCount} failed. Check the queue for details.`);
@@ -248,7 +261,7 @@ export default function AdminPage() {
                                     >
                                         <input
                                             type="file"
-                                            accept="image/*"
+                                            accept="image/*,video/*"
                                             multiple
                                             className="hidden"
                                             id="file-upload"
@@ -267,9 +280,9 @@ export default function AdminPage() {
                                                 </div>
                                                 <div>
                                                     <span className="text-gray-300">
-                                                        {isDragging ? "Release to add files" : (<>Drag &amp; drop images, or <span className="text-purple-400 underline">browse</span></>)}
+                                                        {isDragging ? "Release to add files" : (<>Drag &amp; drop images or videos, or <span className="text-purple-400 underline">browse</span></>)}
                                                     </span>
-                                                    <p className="text-gray-600 text-xs mt-1">JPG, PNG, GIF, WEBP — multiple files supported</p>
+                                                    <p className="text-gray-600 text-xs mt-1">JPG, PNG, GIF, WEBP, MP4, WEBM — multiple files supported</p>
                                                 </div>
                                             </div>
                                         </label>
@@ -280,7 +293,11 @@ export default function AdminPage() {
                                         <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
                                             {fileQueue.map((item, idx) => (
                                                 <div key={idx} className="flex items-center gap-3 p-3 rounded-xl bg-white/5 border border-white/5">
-                                                    <FileImage className="w-4 h-4 text-gray-500 shrink-0" />
+                                                    {item.file.type.startsWith("video/") ? (
+                                                        <Upload className="w-4 h-4 text-gray-500 shrink-0" />
+                                                    ) : (
+                                                        <FileImage className="w-4 h-4 text-gray-500 shrink-0" />
+                                                    )}
                                                     <div className="flex-1 min-w-0">
                                                         <p className="text-sm text-white truncate">{item.file.name}</p>
                                                         <p className="text-xs text-gray-500">{(item.file.size / 1024).toFixed(1)} KB</p>
@@ -406,7 +423,14 @@ export default function AdminPage() {
                                                     className="w-full h-40 object-cover"
                                                     loading="lazy"
                                                 />
-                                                <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-3">
+                                                {img.video_url && (
+                                                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+                                                        <div className="w-10 h-10 bg-black/50 rounded-full flex items-center justify-center backdrop-blur-md">
+                                                            <Play className="w-4 h-4 text-white ml-1" />
+                                                        </div>
+                                                    </div>
+                                                )}
+                                                <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-3 z-20">
                                                     <p className="text-[10px] text-gray-400 font-mono truncate">{img.photo_id}</p>
                                                     {img.description && (
                                                         <p className="text-[11px] text-white/80 line-clamp-2 mt-1 italic">"{img.description}"</p>
@@ -494,16 +518,45 @@ export default function AdminPage() {
                             className="relative max-w-4xl max-h-[85vh] w-full flex flex-col items-center"
                             onClick={(e) => e.stopPropagation()}
                         >
-                            <img
-                                src={focusedImage.photo_image_url}
-                                alt={focusedImage.photo_id}
-                                className="max-h-[70vh] w-auto rounded-2xl object-contain shadow-2xl"
-                            />
+                            <div className="relative inline-flex items-center justify-center max-h-[70vh] rounded-2xl overflow-hidden shadow-2xl bg-black/50">
+                                {focusedImage.video_url ? (
+                                    <video
+                                        src={focusedImage.video_url}
+                                        controls
+                                        autoPlay
+                                        className="max-h-[70vh] w-auto"
+                                        onLoadedMetadata={(e) => {
+                                            if (focusedImage.timestamp) {
+                                                e.currentTarget.currentTime = focusedImage.timestamp;
+                                            }
+                                        }}
+                                        onTimeUpdate={(e) => {
+                                            if (videoFrames.length > 0) {
+                                                const now = e.currentTarget.currentTime;
+                                                let closest = videoFrames[0];
+                                                for (const f of videoFrames) {
+                                                    if (f.timestamp <= now) closest = f;
+                                                    else break;
+                                                }
+                                                if (closest && closest.description !== currentDescription) {
+                                                    setCurrentDescription(closest.description);
+                                                }
+                                            }
+                                        }}
+                                    />
+                                ) : (
+                                    <img
+                                        src={focusedImage.photo_image_url}
+                                        alt={focusedImage.photo_id}
+                                        className="max-h-[70vh] w-auto"
+                                    />
+                                )}
+                            </div>
                             <div className="mt-4 w-full max-w-2xl text-center space-y-2">
                                 <p className="text-xs text-gray-500 font-mono">{focusedImage.photo_id}</p>
-                                {focusedImage.description && (
+                                {currentDescription && (
                                     <p className="text-sm text-white/90 bg-white/5 border border-white/10 rounded-xl px-4 py-3 italic">
-                                        "{focusedImage.description}"
+                                        "{currentDescription}"
                                     </p>
                                 )}
                             </div>

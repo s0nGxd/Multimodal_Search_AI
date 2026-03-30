@@ -1,4 +1,4 @@
-﻿import os
+import os
 import shutil
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from app.services.ingestion_service import ingestion_service
@@ -29,8 +29,14 @@ async def upload_image(file: UploadFile = File(...)):
             result["url"] = f"{BACKEND_URL}{result['url']}"
         return result
     except ValueError as e:
+        print(f"DEBUG: Upload ValueError: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        print(f"DEBUG: Upload Internal Error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/ingest/url")

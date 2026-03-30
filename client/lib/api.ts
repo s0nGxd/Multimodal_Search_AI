@@ -10,11 +10,23 @@ export interface IngestResult {
 export interface SearchResult {
     photo_id: string;
     photo_image_url: string;
+    video_url?: string;
+    timestamp?: number;
     description?: string;
     score?: number;
 }
 
-export async function searchImages(query: string, k: number = 20, threshold: number = 0.9): Promise<SearchResult[]> {
+export interface DetectResult {
+    box: [number, number, number, number] | null;
+    score: number | null;
+}
+
+export interface VideoFrame {
+    timestamp: number;
+    description: string;
+}
+
+export async function searchImages(query: string, k: number = 20, threshold: number = 0.20): Promise<SearchResult[]> {
     const res = await fetch(`${API_BASE}/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -54,6 +66,14 @@ export async function ingestViaUrl(url: string, photo_id?: string) {
     return res.json();
 }
 
+export async function getVideoFrames(videoUrl: string): Promise<VideoFrame[]> {
+    const res = await fetch(`${API_BASE}/video/frames?url=${encodeURIComponent(videoUrl)}`);
+    if (!res.ok) {
+        throw new Error("Failed to fetch video frames");
+    }
+    return res.json();
+}
+
 export async function listAllImages(): Promise<SearchResult[]> {
     const res = await fetch(`${API_BASE}/images/all`);
     if (!res.ok) throw new Error('Failed to fetch images');
@@ -72,5 +92,15 @@ export async function bulkIngest(limit: number = 50) {
         throw new Error(errorText || 'Bulk ingestion failed');
     }
 
+    return res.json();
+}
+
+export async function detectObject(photo_image_url: string, query: string, base64_image?: string): Promise<DetectResult> {
+    const res = await fetch(`${API_BASE}/detect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ photo_image_url, query, base64_image })
+    });
+    if (!res.ok) throw new Error('Detection failed');
     return res.json();
 }

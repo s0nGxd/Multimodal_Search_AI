@@ -28,7 +28,7 @@ class SearchService:
 
         # Load Model (AutoModel supports CLIP, SigLIP, and other vision-language models)
         print(f"Loading vision-language model: {self.model_name} on {self.device}")
-        self.model = AutoModel.from_pretrained(self.model_name).to(self.device)
+        self.model = AutoModel.from_pretrained(self.model_name, use_safetensors=True).to(self.device)
         self.processor = AutoProcessor.from_pretrained(self.model_name)
         self.model.eval()
 
@@ -96,7 +96,6 @@ class SearchService:
             all_vectors.extend([vectors[j] for j in range(len(batch))])
         return all_vectors
 
-    def search(self, query: str, k: int = 20, threshold: float = 0.75):
         """Hybrid search using 3 channels fused via Reciprocal Rank Fusion (RRF).
 
         Channels:
@@ -115,58 +114,49 @@ class SearchService:
             if self.table is None:
                 return []
 
-        # Apply SigLIP prompt template for vector search only — improves zero-shot accuracy
         vector_query = f"a photo of {query.strip()}"
         query_vec = self.embed_text(vector_query)
-        select_cols = ["photo_id", "photo_image_url", "description", "_distance"]
-        ranked_lists: list[pd.DataFrame] = []
+        select_cols = ["photo_id", "photo_image_url", "video_url", "timestamp", "description", "_distance"]
+        ranked_lists = []
 
-        # --- Channel 1: Image vector search (visual similarity) ---
+        # We query wider nets (k * 2) so we have enough candidates before filtering via threshold at the end
         try:
             df = (
                 self.table.search(query_vec, vector_column_name="vector")
                 .metric("cosine")
-                .limit(k)
+                .limit(k * 2)
                 .select(select_cols)
                 .to_pandas()
             )
-            df = df[df["_distance"] <= threshold]
             ranked_lists.append(df)
         except Exception as e:
             print(f"Image vector search failed: {e}")
-            ranked_lists.append(pd.DataFrame())
 
-        # --- Channel 2: Caption vector search (semantic text match) ---
         try:
             df = (
                 self.table.search(query_vec, vector_column_name="caption_vector")
                 .metric("cosine")
-                .limit(k)
+                .limit(k * 2)
                 .select(select_cols)
                 .to_pandas()
             )
-            df = df[df["_distance"] <= threshold]
             ranked_lists.append(df)
         except Exception as e:
             print(f"Caption vector search failed: {e}")
-            ranked_lists.append(pd.DataFrame())
 
-        # --- Channel 3: BM25 full-text search (raw query, exact keyword match) ---
         try:
             fts_df = (
-                self.table.search(query, query_type="fts")  # raw query — no template
-                .limit(k)
-                .select(["photo_id", "photo_image_url", "description"])
+                self.table.search(query, query_type="fts")
+                .limit(k * 2)
+                .select(["photo_id", "photo_image_url", "video_url", "timestamp", "description"])
                 .to_pandas()
             )
-            fts_df["_distance"] = 1.0  # placeholder only; not used for scoring
+            fts_df["_distance"] = 1.0
+            fts_df["_bm25_found"] = True
             ranked_lists.append(fts_df)
         except Exception as e:
-            print(f"BM25 search skipped (index may not exist yet): {e}")
+            print(f"BM25 search skipped: {e}")
 
-        # --- Reciprocal Rank Fusion ---
-        # Each channel contributes 1/(RRF_K + rank) to a shared score.
-        # Higher combined score = better overall match across all channels.
         RRF_K = 60
         rrf_scores: dict[str, float] = {}
         best_row: dict[str, dict] = {}
@@ -177,24 +167,95 @@ class SearchService:
             for rank, (_, row) in enumerate(result_df.iterrows()):
                 pid = row["photo_id"]
                 rrf_scores[pid] = rrf_scores.get(pid, 0.0) + 1.0 / (RRF_K + rank + 1)
+                
                 row_dist = float(row.get("_distance", 1.0))
-                if pid not in best_row or row_dist < float(best_row[pid].get("_distance", 1.0)):
+                is_bm25 = bool(row.get("_bm25_found", False))
+                
+                if pid not in best_row:
                     best_row[pid] = row.to_dict()
+                else:
+                    if row_dist < float(best_row[pid].get("_distance", 1.0)):
+                        best_row[pid]["_distance"] = row_dist
+                    if is_bm25:
+                        best_row[pid]["_bm25_found"] = True
 
         if not rrf_scores:
             return []
 
-        # Sort descending by RRF score (higher = better combined match)
-        sorted_pids = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)
-        max_rrf = rrf_scores[sorted_pids[0]]
+        top_candidates = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)[:15]
+        
+        from app.services.detection_service import detection_service
+        import os
+        from PIL import Image
+        
+        for pid in top_candidates:
+            row = best_row[pid]
+            url = row.get("photo_image_url", "")
+            if "/images/" in url:
+                file_name = url.split("/images/")[-1]
+                local_path = os.path.join("data", file_name)
+                if os.path.exists(local_path):
+                    try:
+                        img = Image.open(local_path).convert("RGB")
+                        img.thumbnail((768, 768)) # aggressive optimization for huge memory bounds
+                        det = detection_service.detect(img, query)
+                        if det:
+                            score = det.get("score", 0)
+                            if score > 0.15:
+                                rrf_scores[pid] += (score * 10.0)
+                            elif score > 0.05:
+                                rrf_scores[pid] += (score * 2.0)
+                    except Exception as e:
+                        pass 
 
+        sorted_pids = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)
+
+        SIM_FLOOR = 0.15
+        SIM_CEIL = 1.00
+
+        def rescale_dist(dist: float) -> float:
+            raw_sim = 1.0 - dist
+            scaled = (raw_sim - SIM_FLOOR) / (SIM_CEIL - SIM_FLOOR)
+            return max(0.0, min(1.0, scaled))
+
+        seen_videos = set()
         results = []
-        for pid in sorted_pids[:k]:
+        for pid in sorted_pids:
             row = best_row[pid].copy()
-            # Attach normalized RRF score: top result = 1.0, others proportionally lower.
-            # This gives a score that reflects multi-channel relevance, not raw vector distance.
-            row["_rrf_score"] = rrf_scores[pid] / max_rrf
+            v_url = row.get("video_url", "")
+            
+            if v_url and v_url in seen_videos:
+                continue
+            if v_url:
+                seen_videos.add(v_url)
+                
+            dist = float(row.get("_distance", 1.0))
+            is_bm25 = row.get("_bm25_found", False)
+            
+            if dist > 0.99 and is_bm25:
+                base_sim = 0.70  # Standard 70% confidence for exact text matches
+            else:
+                base_sim = rescale_dist(dist)
+                if is_bm25:
+                    base_sim += 0.20 # Bump visual matches by 20% if text explicitly mentions it
+            
+            if rrf_scores[pid] >= 1.0:
+                # Add 30% absolute confidence flat bump for verified OWL-ViT physical objects
+                base_sim += 0.30
+                
+            final_sim = min(1.0, max(0.0, base_sim))
+            
+            # Enforce the user interface threshold slider parameter!
+            if final_sim < threshold:
+                continue
+                
+            row["_rrf_score"] = rrf_scores[pid]
+            row["similarity_score"] = final_sim
+            
             results.append(row)
+            if len(results) >= k:
+                break
+                
         return results
 
 search_service = SearchService()

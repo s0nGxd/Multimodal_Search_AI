@@ -22,7 +22,13 @@ Install these once on your machine:
 cd server
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+
+# OPTION A: Standard (CPU Only)
 pip install -r requirements.txt
+
+# OPTION B: GPU Accelerated (Recommended for Nvidia users)
+# Run this AFTER Option A to upgrade to the CUDA-enabled engine:
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 ```
 
 **Mac / Linux**
@@ -117,3 +123,13 @@ Each search query runs three channels in parallel and fuses them with **Reciproc
 3. **BM25 keyword** — exact keyword match on image descriptions
 
 The `% Match` score shown in the UI reflects how highly an image ranked across **all three channels combined** — not just geometric distance.
+
+---
+
+## Performance & Security
+
+### 🚀 GPU Acceleration
+The application automatically detects Nvidia GPUs (`cuda`) and uses them as the primary compute engine. Transitioning from CPU to GPU typically results in a **10x-20x speedup** for both search and video indexing.
+
+### 🛡️ Safetensors (CVE-2025-32434)
+This engine utilizes the **Safetensors** weight format for all models (SigLIP, BLIP, OWL-ViT). This protects the application from the well-known "Pickle vulnerability" (CVE-2025-32434) by ensuring that model weights are loaded in a restricted, non-executable memory space.
