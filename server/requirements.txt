@@ -1,10 +1,6 @@
 # Core AI/ML
 transformers>=4.44.0
 safetensors>=0.4.0
-# For GPU acceleration (Nvidia), install torch/torchvision via:
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-# For CPU only:
-#   pip install torch torchvision
 torch>=2.3.0
 torchvision>=0.18.0
 
@@ -15,7 +11,6 @@ lance>=0.15.0
 # Data Processing
 pyarrow>=15.0.0
 pillow>=10.4.0
-tqdm>=4.66.0
 numpy>=1.26.0
 pandas
 
@@ -34,5 +29,4 @@ requests
 huggingface-hub>=0.20.0
 sentencepiece
 opencv-python-headless>=4.9.0
-
-
+protobuf

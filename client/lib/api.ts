@@ -21,6 +21,12 @@ export interface DetectResult {
     score: number | null;
 }
 
+export interface TrackResult {
+    track_id: number;
+    bbox: [number, number, number, number];
+    score: number;
+}
+
 export interface VideoFrame {
     timestamp: number;
     description: string;
@@ -102,5 +108,21 @@ export async function detectObject(photo_image_url: string, query: string, base6
         body: JSON.stringify({ photo_image_url, query, base64_image })
     });
     if (!res.ok) throw new Error('Detection failed');
+    return res.json();
+}
+
+export async function trackObject(
+    photo_image_url: string,
+    query: string,
+    video_url?: string,
+    video_id?: string,
+    base64_image?: string
+): Promise<{ tracks: TrackResult[] }> {
+    const res = await fetch(`${API_BASE}/track`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ photo_image_url, video_url, query, video_id, base64_image })
+    });
+    if (!res.ok) throw new Error('Tracking failed');
     return res.json();
 }

@@ -2,7 +2,7 @@ import os
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict
 from app.services.search_service import search_service
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
@@ -127,6 +127,53 @@ async def search_images(req: SearchRequest):
         return response
     except Exception as e:
         print(f"Search error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class TrackRequest(BaseModel):
+    photo_image_url: str = ""
+    video_url: Optional[str] = None
+    base64_image: str = None
+    query: str
+    video_id: Optional[str] = None
+
+class TrackResponse(BaseModel):
+    tracks: List[Dict] = []  # List of {track_id, bbox, score}
+
+@router.post("/track", response_model=TrackResponse)
+async def track_object(req: TrackRequest):
+    try:
+        from app.services.tracking_service import tracking_service
+        import io
+        import os
+        import base64
+        from PIL import Image
+        
+        if req.base64_image:
+            image_data = base64.b64decode(req.base64_image.split(",")[1] if "," in req.base64_image else req.base64_image)
+            img = Image.open(io.BytesIO(image_data)).convert("RGB")
+        else:
+            url = req.photo_image_url or (req.video_url or "")
+            if "/images/" in url:
+                file_name = url.split("/images/")[-1]
+                local_path = os.path.join("data", file_name)
+                if os.path.exists(local_path):
+                    img = Image.open(local_path).convert("RGB")
+                else:
+                    raise FileNotFoundError(f"Local image not found: {local_path}")
+            else:
+                import requests
+                r = requests.get(url, timeout=10)
+                r.raise_for_status()
+                img = Image.open(io.BytesIO(r.content)).convert("RGB")
+        
+        video_id = req.video_id or req.video_url or req.photo_image_url
+        tracking_service.reset_for_new_video(video_id)
+        
+        tracks = tracking_service.detect_and_track(img, req.query, return_all_detections=True)
+        
+        return TrackResponse(tracks=tracks)
+    except Exception as e:
+        print(f"Tracking error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/detect", response_model=DetectResponse)

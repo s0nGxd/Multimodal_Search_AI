@@ -57,8 +57,15 @@ You need **two terminals** open simultaneously.
 **Windows**
 ```powershell
 cd server
-.\.venv\Scripts\Activate.ps1
-python -m app.main
+.venv\Scripts\Activate.ps1
+uvicorn app.main:app --reload --port 8000
+```
+
+**Mac / Linux**
+```bash
+cd server
+source .venv/bin/activate
+uvicorn app.main:app --reload --port 8000
 ```
 
 **Mac / Linux**

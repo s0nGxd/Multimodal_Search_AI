@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search, Image as ImageIcon, Sparkles, Loader2, ArrowRight, Play } from "lucide-react";
 import Link from "next/link";
-import { searchImages, SearchResult, detectObject, getVideoFrames, VideoFrame } from "@/lib/api";
+import { searchImages, SearchResult, detectObject, getVideoFrames, VideoFrame, trackObject, TrackResult } from "@/lib/api";
 
 export default function Home() {
     const [query, setQuery] = useState("");
@@ -15,7 +15,7 @@ export default function Home() {
     const [minSimilarity, setMinSimilarity] = useState(0.2);
     const [showSettings, setShowSettings] = useState(false);
     const [focusedImage, setFocusedImage] = useState<SearchResult | null>(null);
-    const [bbox, setBbox] = useState<[number, number, number, number] | null>(null);
+    const [bboxes, setBboxes] = useState<TrackResult[]>([]);
     const videoRef = useRef<HTMLVideoElement>(null);
     const lastDetectTime = useRef<number>(0);
     const [isDetecting, setIsDetecting] = useState(false);
@@ -24,11 +24,10 @@ export default function Home() {
 
     useEffect(() => {
         if (focusedImage) {
-            setBbox(null);
+            setBboxes([]);
             setCurrentDescription(focusedImage.description || "");
             
             if (focusedImage.video_url) {
-                // Preload frame texts
                 getVideoFrames(focusedImage.video_url).then(setVideoFrames).catch(console.error);
             } else {
                 setVideoFrames([]);
@@ -36,8 +35,10 @@ export default function Home() {
 
             if (query && hasSearched) {
                 lastDetectTime.current = 0;
-                detectObject(focusedImage.photo_image_url, query)
-                    .then(res => setBbox(res.box))
+                const targetUrl = focusedImage.video_url || focusedImage.photo_image_url;
+                const videoId = focusedImage.video_url || undefined;
+                trackObject(focusedImage.photo_image_url, query, focusedImage.video_url, videoId)
+                    .then(res => setBboxes(res.tracks || []))
                     .catch(console.error);
             }
         }
@@ -49,7 +50,6 @@ export default function Home() {
 
         const now = video.currentTime;
 
-        // Sync text description instantly without waiting for detection loop
         if (videoFrames.length > 0) {
             let closest = videoFrames[0];
             for (const f of videoFrames) {
@@ -63,14 +63,12 @@ export default function Home() {
 
         if (isDetecting || !query || !focusedImage) return;
 
-        // Broadcast a detection request roughly every 1 second of playback change
-        if (Math.abs(now - lastDetectTime.current) >= 1.0) {
+        if (Math.abs(now - lastDetectTime.current) >= 0.3) {
             lastDetectTime.current = now;
             setIsDetecting(true);
 
             try {
                 const canvas = document.createElement("canvas");
-                // Cap resolution at 800px for lightning-fast network transmission & decoding
                 const MAX_WIDTH = 800;
                 const scale = Math.min(1.0, MAX_WIDTH / video.videoWidth);
                 canvas.width = video.videoWidth * scale;
@@ -79,16 +77,23 @@ export default function Home() {
                 const ctx = canvas.getContext("2d");
                 if (ctx && canvas.width > 0) {
                     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                    const base64Image = canvas.toDataURL("image/jpeg", 0.5);
-                    const result = await detectObject(focusedImage.photo_image_url, query, base64Image);
-                    if (result && result.box) {
-                        setBbox(result.box);
+                    const base64Image = canvas.toDataURL("image/jpeg", 0.3);
+                    const videoId = focusedImage.video_url || undefined;
+                    const result = await trackObject(
+                        focusedImage.photo_image_url,
+                        query,
+                        focusedImage.video_url,
+                        videoId,
+                        base64Image
+                    );
+                    if (result && result.tracks) {
+                        setBboxes(result.tracks);
                     } else {
-                        setBbox(null);
+                        setBboxes([]);
                     }
                 }
             } catch (err) {
-                console.error("Live detection failed:", err);
+                console.error("Live tracking failed:", err);
             } finally {
                 setIsDetecting(false);
             }
@@ -342,18 +347,27 @@ export default function Home() {
                                         className="max-h-[70vh] w-auto"
                                     />
                                 )}
-                                {bbox && (
+                                {bboxes.map((box, idx) => (
                                     <div
-                                        className="absolute border-[3px] border-red-500 bg-red-500/10 pointer-events-none rounded sm:border-4 transition-all duration-1000 ease-out"
+                                        key={box.track_id || idx}
+                                        className="absolute border-[3px] bg-red-500/10 pointer-events-none rounded sm:border-4 transition-all duration-300 ease-out"
                                         style={{
-                                            left: `${bbox[0] * 100}%`,
-                                            top: `${bbox[1] * 100}%`,
-                                            width: `${(bbox[2] - bbox[0]) * 100}%`,
-                                            height: `${(bbox[3] - bbox[1]) * 100}%`,
-                                            boxShadow: "0 0 15px rgba(239, 68, 68, 0.5)"
+                                            left: `${box.bbox[0] * 100}%`,
+                                            top: `${box.bbox[1] * 100}%`,
+                                            width: `${(box.bbox[2] - box.bbox[0]) * 100}%`,
+                                            height: `${(box.bbox[3] - box.bbox[1]) * 100}%`,
+                                            boxShadow: "0 0 15px rgba(239, 68, 68, 0.5)",
+                                            borderColor: `hsl(${(box.track_id * 60) % 360}, 80%, 55%)`
                                         }}
-                                    />
-                                )}
+                                    >
+                                        <span 
+                                            className="absolute -top-6 left-0 text-[10px] font-bold px-1 rounded"
+                                            style={{ color: `hsl(${(box.track_id * 60) % 360}, 80%, 55%)`, backgroundColor: "rgba(0,0,0,0.7)" }}
+                                        >
+                                            #{box.track_id}
+                                        </span>
+                                    </div>
+                                ))}
                             </div>
                             <div className="mt-4 w-full max-w-2xl text-center space-y-2">
                                 <div className="flex items-center justify-center gap-3">
