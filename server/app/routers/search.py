@@ -117,7 +117,7 @@ async def search_images(req: SearchRequest):
                 "photo_id": r["photo_id"],
                 "photo_image_url": url,
                 "video_url": v_url if v_url else None,
-                "timestamp": float(row.get("timestamp", 0.0)) if pd.notna(row.get("timestamp")) else None,
+                "timestamp": float(r.get("timestamp", 0.0)) if pd.notna(r.get("timestamp")) else None,
                 "description": r.get("description", ""),
                 "score": float(score)
             })

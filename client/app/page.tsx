@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search, Image as ImageIcon, Sparkles, Loader2, ArrowRight, Play } from "lucide-react";
 import Link from "next/link";
-import { searchImages, SearchResult, detectObject, getVideoFrames, VideoFrame, trackObject, TrackResult } from "@/lib/api";
+import { searchImages, SearchResult, getVideoFrames, VideoFrame, trackObject, TrackResult } from "@/lib/api";
 
 export default function Home() {
     const [query, setQuery] = useState("");
@@ -45,30 +45,17 @@ export default function Home() {
 
     const handleTimeUpdate = async () => {
         const video = videoRef.current;
-        if (!video) return;
+        if (!video || !query || !focusedImage) return;
 
         const now = video.currentTime;
 
-        if (videoFrames.length > 0) {
-            let closest = videoFrames[0];
-            for (const f of videoFrames) {
-                if (f.timestamp <= now) closest = f;
-                else break;
-            }
-            if (closest && closest.description !== currentDescription) {
-                setCurrentDescription(closest.description);
-            }
-        }
-
-        if (isDetecting || !query || !focusedImage) return;
-
-        if (Math.abs(now - lastDetectTime.current) >= 0.04) {
+        if (!isDetecting && Math.abs(now - lastDetectTime.current) >= 0.15) {
             lastDetectTime.current = now;
             setIsDetecting(true);
 
             try {
                 const canvas = document.createElement("canvas");
-                const MAX_WIDTH = 480;
+                const MAX_WIDTH = 480; 
                 const scale = Math.min(1.0, MAX_WIDTH / video.videoWidth);
                 canvas.width = video.videoWidth * scale;
                 canvas.height = video.videoHeight * scale;
@@ -78,6 +65,7 @@ export default function Home() {
                     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                     const base64Image = canvas.toDataURL("image/jpeg", 0.3);
                     const videoId = focusedImage.video_url || undefined;
+                    
                     const result = await trackObject(
                         focusedImage.photo_image_url,
                         query,
@@ -85,16 +73,26 @@ export default function Home() {
                         videoId,
                         base64Image
                     );
+                    
                     if (result && result.tracks) {
                         setBboxes(result.tracks);
-                    } else {
-                        setBboxes([]);
                     }
                 }
             } catch (err) {
-                console.error("Live tracking failed:", err);
+                console.error("Tracking update failed:", err);
             } finally {
                 setIsDetecting(false);
+            }
+        }
+
+        if (videoFrames.length > 0) {
+            let closest = videoFrames[0];
+            for (const f of videoFrames) {
+                if (f.timestamp <= now) closest = f;
+                else break;
+            }
+            if (closest && closest.description !== currentDescription) {
+                setCurrentDescription(closest.description);
             }
         }
     };
@@ -146,17 +144,13 @@ export default function Home() {
                         <h1 className="text-5xl md:text-7xl font-bold tracking-tight mb-4 pb-2 bg-clip-text text-transparent bg-gradient-to-b from-white to-gray-500 leading-tight">
                             Find anything <br /> in your images.
                         </h1>
-                        <p className="text-gray-400 text-lg max-w-xl mx-auto">
+                        <p className="text-gray-400 text-lg max-w-xl mx-auto font-medium text-center">
                             Natural language search powered by SigLIP & LanceDB.
-                            Search by concepts, emotions, or objects.
                         </p>
                     </motion.div>
 
                     <div className="relative max-w-2xl mx-auto group">
-                        <form
-                            onSubmit={handleSearch}
-                            className="relative z-10"
-                        >
+                        <form onSubmit={handleSearch} className="relative z-10">
                             <div className="absolute inset-0 bg-gradient-to-r from-purple-600/20 to-blue-600/20 rounded-2xl blur-xl opacity-0 group-focus-within:opacity-100 transition-opacity" />
                             <div className="relative flex items-center bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl transition-all">
                                 <Search className="ml-4 w-5 h-5 text-gray-500" />
@@ -164,7 +158,7 @@ export default function Home() {
                                     type="text"
                                     value={query}
                                     onChange={(e) => setQuery(e.target.value)}
-                                    placeholder="Describe an image..."
+                                    placeholder="Describe what to find..."
                                     className="w-full bg-transparent border-none focus:ring-0 focus:outline-none py-5 px-4 text-white placeholder-gray-600"
                                 />
                                 <button
@@ -176,57 +170,6 @@ export default function Home() {
                                 </button>
                             </div>
                         </form>
-
-                        <div className="mt-4 flex justify-center">
-                            <button
-                                onClick={() => setShowSettings(!showSettings)}
-                                className="text-xs text-gray-500 hover:text-white flex items-center gap-1 transition-colors"
-                            >
-                                {showSettings ? "Hide Options" : "Advanced Search Options"}
-                                <span className={`transform transition-transform ${showSettings ? 'rotate-180' : ''}`}>▼</span>
-                            </button>
-                        </div>
-
-                        <AnimatePresence>
-                            {showSettings && (
-                                <motion.div
-                                    initial={{ opacity: 0, height: 0 }}
-                                    animate={{ opacity: 1, height: 'auto' }}
-                                    exit={{ opacity: 0, height: 0 }}
-                                    className="overflow-hidden"
-                                >
-                                    <div className="bg-white/5 border border-white/5 rounded-xl p-4 mt-2 grid grid-cols-2 gap-6 text-left">
-                                        <div>
-                                            <label className="block text-xs text-gray-400 mb-2 font-medium">
-                                                Max Results: <span className="text-white">{resultCount}</span>
-                                            </label>
-                                            <input
-                                                type="range"
-                                                min="1"
-                                                max="50"
-                                                value={resultCount}
-                                                onChange={(e) => setResultCount(parseInt(e.target.value))}
-                                                className="w-full h-1.5 bg-white/10 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-xs text-gray-400 mb-2 font-medium">
-                                                Min Similarity: <span className="text-white">{Math.round(minSimilarity * 100)}%</span>
-                                            </label>
-                                            <input
-                                                type="range"
-                                                min="0"
-                                                max="100"
-                                                step="5"
-                                                value={minSimilarity * 100}
-                                                onChange={(e) => setMinSimilarity(parseInt(e.target.value) / 100)}
-                                                className="w-full h-1.5 bg-white/10 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white"
-                                            />
-                                        </div>
-                                    </div>
-                                </motion.div>
-                            )}
-                        </AnimatePresence>
                     </div>
                 </div>
 
@@ -250,8 +193,8 @@ export default function Home() {
                                     />
                                     {img.video_url && (
                                         <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-                                            <div className="w-12 h-12 bg-black/50 rounded-full flex items-center justify-center backdrop-blur-md">
-                                                <Play className="w-5 h-5 text-white ml-1" />
+                                            <div className="w-12 h-12 bg-black/50 rounded-full flex items-center justify-center backdrop-blur-md border border-white/10 shadow-xl">
+                                                <Play className="w-5 h-5 text-white ml-1 fill-white" />
                                             </div>
                                         </div>
                                     )}
@@ -259,7 +202,7 @@ export default function Home() {
                                         <div className="flex justify-between items-center mb-1.5">
                                             <p className="text-[10px] text-gray-400 font-mono truncate">{img.photo_id}</p>
                                             {img.score && (
-                                                <span className="text-[10px] bg-purple-500/30 border border-purple-500/30 px-1.5 py-0.5 rounded text-purple-300 font-medium whitespace-nowrap">
+                                                <span className="text-[10px] bg-purple-500/30 border border-purple-500/30 px-1.5 py-0.5 rounded text-purple-300 font-bold">
                                                     {Math.round(img.score * 100)}% Match
                                                 </span>
                                             )}
@@ -276,6 +219,7 @@ export default function Home() {
                     </div>
                 </div>
             </div>
+
             <AnimatePresence>
                 {focusedImage && (
                     <motion.div
@@ -317,10 +261,12 @@ export default function Home() {
                                         className="max-h-[70vh] w-auto"
                                     />
                                 )}
-                                {bboxes.map((box, idx) => (
-                                    <div
-                                        key={box.track_id || idx}
-                                        className="absolute border-[3px] bg-red-500/10 pointer-events-none rounded sm:border-4 transition-all duration-300 ease-out"
+                                {bboxes.map((box) => (
+                                    <motion.div
+                                        key={box.track_id}
+                                        layout
+                                        transition={{ type: "tween", ease: "linear", duration: 0.15 }}
+                                        className="absolute border-[3px] bg-red-500/10 pointer-events-none rounded sm:border-4 transition-all"
                                         style={{
                                             left: `${box.bbox[0] * 100}%`,
                                             top: `${box.bbox[1] * 100}%`,
@@ -336,18 +282,10 @@ export default function Home() {
                                         >
                                             #{box.track_id}
                                         </span>
-                                    </div>
+                                    </motion.div>
                                 ))}
                             </div>
-                            <div className="mt-4 w-full max-w-2xl text-center space-y-2">
-                                <div className="flex items-center justify-center gap-3">
-                                    <p className="text-xs text-gray-500 font-mono">{focusedImage.photo_id}</p>
-                                    {focusedImage.score && (
-                                        <span className="text-xs bg-purple-500/30 border border-purple-500/30 px-2 py-0.5 rounded text-purple-300 font-medium">
-                                            {Math.round(focusedImage.score * 100)}% Match
-                                        </span>
-                                    )}
-                                </div>
+                            <div className="mt-4 w-full max-w-2xl text-center space-y-2 px-4">
                                 {currentDescription && (
                                     <p className="text-sm text-white/90 bg-white/5 border border-white/10 rounded-xl px-4 py-3 italic">
                                         "{currentDescription}"
