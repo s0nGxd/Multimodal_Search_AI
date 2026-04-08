@@ -1,210 +1,44 @@
 import torch
 import numpy as np
 from typing import List, Dict, Optional
-from dataclasses import dataclass
+from PIL import Image
+try:
+    from norfair import Detection, Tracker
+except ImportError:
+    # Fallback for environment setup
+    Detection, Tracker = None, None
 
-
-@dataclass
-class Track:
-    track_id: int
-    bbox: List[float]
-    score: float
-    age: int = 0
-    hits: int = 1
+def iou(detection: Detection, tracked_object) -> float:
+    """
+    Computes IoU between a detection and a tracked object.
+    Norfair expects distance, so we return 1.0 - IoU.
+    """
+    # detection.points: [[xmin, ymin], [xmax, ymax]]
+    # tracked_object.estimate: [[xmin, ymin], [xmax, ymax]]
     
-    def to_dict(self) -> Dict:
-        return {
-            "track_id": self.track_id,
-            "bbox": self.bbox,
-            "score": self.score
-        }
-
-
-class ByteTracker:
-    def __init__(
-        self,
-        track_thresh: float = 0.3,
-        track_buffer: int = 30,
-        match_thresh: float = 0.3,
-        new_track_thresh: float = 0.4
-    ):
-        self.track_thresh = track_thresh
-        self.track_buffer = track_buffer
-        self.match_thresh = match_thresh
-        self.new_track_thresh = new_track_thresh
-        
-        self.tracks: List[Track] = []
-        self.track_id_counter = 0
-        self.frame_count = 0
-        self.max_time_lost = track_buffer
+    det_box = detection.points.flatten() # [xmin, ymin, xmax, ymax]
+    track_box = tracked_object.estimate.flatten() # [xmin, ymin, xmax, ymax]
     
-    def reset(self):
-        self.tracks = []
-        self.track_id_counter = 0
-        self.frame_count = 0
+    # Calculate intersection
+    ixmin = max(det_box[0], track_box[0])
+    iymin = max(det_box[1], track_box[1])
+    ixmax = min(det_box[2], track_box[2])
+    iymax = min(det_box[3], track_box[3])
     
-    @staticmethod
-    def compute_iou(box1: List[float], box2: List[float]) -> float:
-        x1_min, y1_min, x1_max, y1_max = box1
-        x2_min, y2_min, x2_max, y2_max = box2
-        
-        inter_xmin = max(x1_min, x2_min)
-        inter_ymin = max(y1_min, y2_min)
-        inter_xmax = min(x1_max, x2_max)
-        inter_ymax = min(y1_max, y2_max)
-        
-        if inter_xmax < inter_xmin or inter_ymax < inter_ymin:
-            return 0.0
-        
-        inter_area = (inter_xmax - inter_xmin) * (inter_ymax - inter_ymin)
-        box1_area = (x1_max - x1_min) * (y1_max - y1_min)
-        box2_area = (x2_max - x2_min) * (y2_max - y2_min)
-        union_area = box1_area + box2_area - inter_area
-        
-        return inter_area / union_area if union_area > 0 else 0.0
+    iw = max(0, ixmax - ixmin)
+    ih = max(0, iymax - iymin)
+    area_intersection = iw * ih
     
-    def update(self, detections: List) -> List[Track]:
-        self.frame_count += 1
-        
-        if not detections:
-            self._remove_lost_tracks()
-            return []
-        
-        try:
-            high_det = [(d[0], d[1]) for d in detections if d[1] >= self.track_thresh]
-            low_det = [(d[0], d[1]) for d in detections if self.new_track_thresh <= d[1] < self.track_thresh]
-            
-            self._activate_new_tracks(high_det)
-            self._update_tracks(high_det)
-            self._match_lost_tracks(low_det)
-            self._remove_lost_tracks()
-            
-            return [t for t in self.tracks if t.age <= 1]
-        except Exception as e:
-            print(f"Tracker update error: {e}")
-            self.tracks = []
-            return []
+    # Calculate union
+    area_det = (det_box[2] - det_box[0]) * (det_box[3] - det_box[1])
+    area_track = (track_box[2] - track_box[0]) * (track_box[3] - track_box[1])
+    area_union = area_det + area_track - area_intersection
     
-    def _activate_new_tracks(self, detections: List):
-        if not self.tracks:
-            for bbox, score in detections:
-                track = Track(
-                    track_id=self.track_id_counter,
-                    bbox=bbox,
-                    score=score,
-                    age=0
-                )
-                self.tracks.append(track)
-                self.track_id_counter += 1
-            return
+    if area_union <= 0:
+        return 1.0
         
-        try:
-            matched, unmatched = self._match_detections_to_tracks(detections)
-            
-            for det_idx in unmatched:
-                if det_idx < len(detections):
-                    track = Track(
-                        track_id=self.track_id_counter,
-                        bbox=detections[det_idx][0],
-                        score=detections[det_idx][1],
-                        age=0
-                    )
-                    self.tracks.append(track)
-                    self.track_id_counter += 1
-        except Exception as e:
-            print(f"Activate new tracks error: {e}")
-    
-    def _update_tracks(self, detections: List):
-        try:
-            matched, _ = self._match_detections_to_tracks(detections)
-            
-            for det_idx, track_idx in matched:
-                if track_idx < len(self.tracks):
-                    self.tracks[track_idx].bbox = detections[det_idx][0]
-                    self.tracks[track_idx].score = detections[det_idx][1]
-                    self.tracks[track_idx].age = 0
-                    self.tracks[track_idx].hits += 1
-        except Exception as e:
-            print(f"Update tracks error: {e}")
-    
-    def _match_lost_tracks(self, low_detections: List):
-        if not low_detections:
-            return
-            
-        lost_tracks = [t for t in self.tracks if t.age > self.max_time_lost]
-        if not lost_tracks:
-            return
-        
-        lost_bboxes = [t.bbox for t in lost_tracks]
-        det_bboxes = [d[0] for d in low_detections]
-        
-        iou_matrix = np.zeros((len(lost_bboxes), len(det_bboxes)))
-        for i, lb in enumerate(lost_bboxes):
-            for j, db in enumerate(det_bboxes):
-                iou_matrix[i, j] = self.compute_iou(lb, db)
-        
-        matched_pairs = []
-        for _ in range(min(len(lost_tracks), len(low_detections))):
-            max_iou = 0
-            max_pair = None
-            for i in range(len(lost_tracks)):
-                for j in range(len(low_detections)):
-                    if iou_matrix[i, j] > max_iou and iou_matrix[i, j] >= self.match_thresh:
-                        max_iou = iou_matrix[i, j]
-                        max_pair = (i, j)
-            
-            if max_pair is None:
-                break
-                
-            matched_pairs.append(max_pair)
-            iou_matrix[max_pair[0], :] = 0
-            iou_matrix[:, max_pair[1]] = 0
-        
-        for track_idx, det_idx in matched_pairs:
-            lost_tracks[track_idx].bbox = low_detections[det_idx][0]
-            lost_tracks[track_idx].score = low_detections[det_idx][1]
-            lost_tracks[track_idx].age = 0
-            self.tracks.append(lost_tracks[track_idx])
-    
-    def _match_detections_to_tracks(self, detections: List) -> tuple:
-        if not self.tracks or not detections:
-            return [], list(range(len(detections)))
-        
-        track_bboxes = [t.bbox for t in self.tracks]
-        det_bboxes = [d[0] for d in detections]
-        
-        iou_matrix = np.zeros((len(track_bboxes), len(det_bboxes)))
-        for i, tb in enumerate(track_bboxes):
-            for j, db in enumerate(det_bboxes):
-                iou_matrix[i, j] = self.compute_iou(tb, db)
-        
-        matched = []
-        unmatched_dets = list(range(len(detections)))
-        
-        for _ in range(min(len(self.tracks), len(detections))):
-            max_iou = 0
-            max_pair = None
-            for i in range(len(self.tracks)):
-                for j in unmatched_dets:
-                    if iou_matrix[i, j] > max_iou and iou_matrix[i, j] >= self.match_thresh:
-                        max_iou = iou_matrix[i, j]
-                        max_pair = (i, j)
-            
-            if max_pair is None:
-                break
-                
-            matched.append(max_pair)
-            unmatched_dets.remove(max_pair[1])
-            iou_matrix[max_pair[0], :] = 0
-            iou_matrix[:, max_pair[1]] = 0
-        
-        return matched, unmatched_dets
-    
-    def _remove_lost_tracks(self):
-        self.tracks = [t for t in self.tracks if t.age <= self.max_time_lost]
-        for t in self.tracks:
-            t.age += 1
-
+    iou_val = area_intersection / area_union
+    return 1.0 - iou_val # Return distance (1 - IoU)
 
 class TrackingService:
     _instance = None
@@ -216,56 +50,79 @@ class TrackingService:
         return cls._instance
     
     def _initialize(self):
-        print("Initializing TrackingService (OWL-ViT + Custom ByteTrack)...")
+        print("Initializing TrackingService (OWL-ViT + Norfair)...")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         from app.services.detection_service import detection_service
         self.detection_service = detection_service
         
-        self.tracker = ByteTracker(
-            track_thresh=0.3,
-            track_buffer=30,
-            match_thresh=0.2,
-            new_track_thresh=0.35
+        self.tracker = Tracker(
+            distance_function=iou,
+            distance_threshold=0.7, # Max distance (1 - IoU) to consider a match
+            initialization_delay=0,
+            hit_counter_max=15,
+            past_detections_length=5
         )
         
         self.current_video_id: Optional[str] = None
     
     def reset_for_new_video(self, video_id: str):
         if self.current_video_id != video_id:
-            self.tracker.reset()
+            print(f"Resetting tracker for new video: {video_id}")
+            self.tracker = Tracker(
+                distance_function=iou,
+                distance_threshold=0.7,
+                initialization_delay=0,
+                hit_counter_max=15,
+                past_detections_length=5
+            )
             self.current_video_id = video_id
     
-    def detect_and_track(self, frame, query: str, return_all_detections: bool = False) -> List[Dict]:
-        from PIL import Image
+    def detect_and_track(self, frame: Image.Image, query: str, return_all_detections: bool = False) -> List[Dict]:
+        if Tracker is None:
+            print("Norfair not installed, falling back to raw detection")
+            detections = self._detect_multiple(frame, query)
+            return [{"track_id": i, "bbox": d["box"], "score": d["score"]} for i, d in enumerate(detections)]
+
+        width, height = frame.size
+        detections_raw = self._detect_multiple(frame, query)
         
-        if isinstance(frame, Image.Image):
-            width, height = frame.size
-        else:
-            return []
+        norfair_detections = []
+        for det in detections_raw:
+            box = det["box"]
+            # Convert to pixel coordinates for stability in distance calculation
+            pixel_box = np.array([
+                [box[0] * width, box[1] * height],
+                [box[2] * width, box[3] * height]
+            ])
+            norfair_detections.append(Detection(points=pixel_box, scores=np.array([det["score"]])))
         
-        detections = self._detect_multiple(frame, query)
+        tracked_objects = self.tracker.update(detections=norfair_detections)
         
-        if not detections:
-            return []
-        
-        try:
-            det_tuples = [(d["box"], d["score"]) for d in detections]
-            tracks = self.tracker.update(det_tuples)
+        results = []
+        for obj in tracked_objects:
+            est = obj.estimate
+            normalized_box = [
+                float(est[0][0] / width),
+                float(est[0][1] / height),
+                float(est[1][0] / width),
+                float(est[1][1] / height)
+            ]
             
-            return [t.to_dict() for t in tracks]
-        except Exception as e:
-            print(f"Detect and track error: {e}")
-            return []
+            score = 0.8
+            if obj.last_detection is not None:
+                score = float(obj.last_detection.scores[0])
+            
+            results.append({
+                "track_id": obj.id,
+                "bbox": normalized_box,
+                "score": score
+            })
+            
+        return results
     
-    def _detect_multiple(self, frame, query: str, max_detections: int = 10) -> List[Dict]:
-        from PIL import Image
-        
-        if isinstance(frame, Image.Image):
-            width, height = frame.size
-        else:
-            return []
-        
+    def _detect_multiple(self, frame: Image.Image, query: str, max_detections: int = 10) -> List[Dict]:
+        width, height = frame.size
         texts = [[f"a photo of a {query}", f"{query}", f"a {query}", f"many {query}", f"all {query}"]]
         
         try:
@@ -311,15 +168,14 @@ class TrackingService:
             return detections
             
         except Exception as e:
-            print(f"Detection error: {e}")
+            print(f"Detection error in TrackingService: {e}")
             return []
     
-    def process_video_frames(self, frames: List, query: str) -> List[List[Dict]]:
+    def process_video_frames(self, frames: List[Image.Image], query: str) -> List[List[Dict]]:
         all_results = []
         for frame in frames:
-            result = self.detect_and_track(frame, query, return_all_detections=True)
+            result = self.detect_and_track(frame, query)
             all_results.append(result)
         return all_results
-
 
 tracking_service = TrackingService()
