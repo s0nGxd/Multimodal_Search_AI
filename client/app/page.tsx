@@ -35,7 +35,6 @@ export default function Home() {
 
             if (query && hasSearched) {
                 lastDetectTime.current = 0;
-                const targetUrl = focusedImage.video_url || focusedImage.photo_image_url;
                 const videoId = focusedImage.video_url || undefined;
                 trackObject(focusedImage.photo_image_url, query, focusedImage.video_url, videoId)
                     .then(res => setBboxes(res.tracks || []))
@@ -63,13 +62,13 @@ export default function Home() {
 
         if (isDetecting || !query || !focusedImage) return;
 
-        if (Math.abs(now - lastDetectTime.current) >= 0.3) {
+        if (Math.abs(now - lastDetectTime.current) >= 0.04) {
             lastDetectTime.current = now;
             setIsDetecting(true);
 
             try {
                 const canvas = document.createElement("canvas");
-                const MAX_WIDTH = 800;
+                const MAX_WIDTH = 480;
                 const scale = Math.min(1.0, MAX_WIDTH / video.videoWidth);
                 canvas.width = video.videoWidth * scale;
                 canvas.height = video.videoHeight * scale;
@@ -118,13 +117,11 @@ export default function Home() {
 
     return (
         <main className="min-h-screen bg-black text-white selection:bg-purple-500/30">
-            {/* Background Decor */}
             <div className="fixed inset-0 overflow-hidden pointer-events-none -z-10">
                 <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-purple-900/10 rounded-full blur-[120px]" />
                 <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-900/10 rounded-full blur-[120px]" />
             </div>
 
-            {/* Admin Link */}
             <div className="absolute top-6 right-6">
                 <Link
                     href="/admin"
@@ -136,7 +133,6 @@ export default function Home() {
             </div>
 
             <div className={`transition-all duration-700 ease-in-out ${hasSearched ? 'pt-12' : 'pt-[25vh]'}`}>
-                {/* Hero Section */}
                 <div className="max-w-4xl mx-auto px-6 text-center">
                     <motion.div
                         initial={{ opacity: 0, y: 20 }}
@@ -156,7 +152,6 @@ export default function Home() {
                         </p>
                     </motion.div>
 
-                    {/* Search Bar */}
                     <div className="relative max-w-2xl mx-auto group">
                         <form
                             onSubmit={handleSearch}
@@ -169,7 +164,7 @@ export default function Home() {
                                     type="text"
                                     value={query}
                                     onChange={(e) => setQuery(e.target.value)}
-                                    placeholder="Describe an image... (e.g. 'a person smiling' or 'sunset over mountains')"
+                                    placeholder="Describe an image..."
                                     className="w-full bg-transparent border-none focus:ring-0 focus:outline-none py-5 px-4 text-white placeholder-gray-600"
                                 />
                                 <button
@@ -182,7 +177,6 @@ export default function Home() {
                             </div>
                         </form>
 
-                        {/* Settings Toggle */}
                         <div className="mt-4 flex justify-center">
                             <button
                                 onClick={() => setShowSettings(!showSettings)}
@@ -193,7 +187,6 @@ export default function Home() {
                             </button>
                         </div>
 
-                        {/* Settings Panel */}
                         <AnimatePresence>
                             {showSettings && (
                                 <motion.div
@@ -203,8 +196,6 @@ export default function Home() {
                                     className="overflow-hidden"
                                 >
                                     <div className="bg-white/5 border border-white/5 rounded-xl p-4 mt-2 grid grid-cols-2 gap-6 text-left">
-
-                                        {/* Result Count Control */}
                                         <div>
                                             <label className="block text-xs text-gray-400 mb-2 font-medium">
                                                 Max Results: <span className="text-white">{resultCount}</span>
@@ -217,13 +208,7 @@ export default function Home() {
                                                 onChange={(e) => setResultCount(parseInt(e.target.value))}
                                                 className="w-full h-1.5 bg-white/10 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white"
                                             />
-                                            <div className="flex justify-between text-[10px] text-gray-600 mt-1">
-                                                <span>1</span>
-                                                <span>50</span>
-                                            </div>
                                         </div>
-
-                                        {/* Similarity Threshold Control */}
                                         <div>
                                             <label className="block text-xs text-gray-400 mb-2 font-medium">
                                                 Min Similarity: <span className="text-white">{Math.round(minSimilarity * 100)}%</span>
@@ -237,12 +222,7 @@ export default function Home() {
                                                 onChange={(e) => setMinSimilarity(parseInt(e.target.value) / 100)}
                                                 className="w-full h-1.5 bg-white/10 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white"
                                             />
-                                            <div className="flex justify-between text-[10px] text-gray-600 mt-1">
-                                                <span>0%</span>
-                                                <span>Strict</span>
-                                            </div>
                                         </div>
-
                                     </div>
                                 </motion.div>
                             )}
@@ -250,7 +230,6 @@ export default function Home() {
                     </div>
                 </div>
 
-                {/* Results Grid */}
                 <div className="max-w-7xl mx-auto px-6 mt-20 pb-20">
                     <div className="columns-1 sm:columns-2 md:columns-3 lg:columns-4 gap-6 space-y-6">
                         <AnimatePresence>
@@ -295,17 +274,8 @@ export default function Home() {
                             ))}
                         </AnimatePresence>
                     </div>
-
-                    {!loading && hasSearched && results.length === 0 && (
-                        <div className="text-center py-20">
-                            <ImageIcon className="w-12 h-12 text-gray-700 mx-auto mb-4" />
-                            <h3 className="text-xl font-medium text-gray-500">No matches found</h3>
-                            <p className="text-gray-600">Try adjusting your search or broadening the description.</p>
-                        </div>
-                    )}
                 </div>
             </div>
-            {/* Image Lightbox */}
             <AnimatePresence>
                 {focusedImage && (
                     <motion.div

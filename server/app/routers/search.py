@@ -41,7 +41,6 @@ async def get_video_frames(url: str):
         if search_service.table is None:
             return []
             
-        # Normalize the video URL to match DB storage
         if "/images/" in url:
             url = f"/images/{url.split('/images/')[-1]}"
             
@@ -74,7 +73,6 @@ async def list_all_images():
         for _, row in df.iterrows():
             v_url = row.get("video_url", "")
             
-            # Deduplicate video frames so admin portal represents each video once
             if v_url and isinstance(v_url, str) and v_url.strip():
                 if v_url in seen_videos:
                     continue
@@ -105,7 +103,6 @@ async def search_images(req: SearchRequest):
         results = search_service.search(req.query, req.k, req.threshold)
         response = []
         for r in results:
-            # Use absolute similarity mapped to 0-1 range to prevent >100% values
             score = float(r.get("similarity_score", 0.0))
 
             url = r["photo_image_url"]
@@ -120,7 +117,7 @@ async def search_images(req: SearchRequest):
                 "photo_id": r["photo_id"],
                 "photo_image_url": url,
                 "video_url": v_url if v_url else None,
-                "timestamp": float(r.get("timestamp", 0.0)) if pd.notna(r.get("timestamp")) else None,
+                "timestamp": float(row.get("timestamp", 0.0)) if pd.notna(row.get("timestamp")) else None,
                 "description": r.get("description", ""),
                 "score": float(score)
             })
@@ -137,7 +134,7 @@ class TrackRequest(BaseModel):
     video_id: Optional[str] = None
 
 class TrackResponse(BaseModel):
-    tracks: List[Dict] = []  # List of {track_id, bbox, score}
+    tracks: List[Dict] = [] 
 
 @router.post("/track", response_model=TrackResponse)
 async def track_object(req: TrackRequest):
@@ -167,7 +164,7 @@ async def track_object(req: TrackRequest):
                 img = Image.open(io.BytesIO(r.content)).convert("RGB")
         
         video_id = req.video_id or req.video_url or req.photo_image_url
-        tracking_service.reset_for_new_video(video_id)
+        tracking_service.reset_for_new_video(video_id, req.query)
         
         tracks = tracking_service.detect_and_track(img, req.query, return_all_detections=True)
         
@@ -190,7 +187,6 @@ async def detect_object(req: DetectRequest):
             img = Image.open(io.BytesIO(image_data)).convert("RGB")
         else:
             url = req.photo_image_url
-            # If it's a local backend image, read from file system
             if "/images/" in url:
                 file_name = url.split("/images/")[-1]
                 local_path = os.path.join("data", file_name)

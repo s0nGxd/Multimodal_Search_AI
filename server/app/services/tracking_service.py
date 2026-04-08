@@ -2,43 +2,51 @@ import torch
 import numpy as np
 from typing import List, Dict, Optional
 from PIL import Image
+import traceback
+
 try:
     from norfair import Detection, Tracker
 except ImportError:
     # Fallback for environment setup
     Detection, Tracker = None, None
 
-def iou(detection: Detection, tracked_object) -> float:
+def hybrid_distance(detection: Detection, tracked_object) -> float:
     """
-    Computes IoU between a detection and a tracked object.
-    Norfair expects distance, so we return 1.0 - IoU.
+    Hybrid distance: IoU + Euclidean Centroid distance.
+    This allows tracking even if boxes don't overlap (for fast movement).
     """
-    # detection.points: [[xmin, ymin], [xmax, ymax]]
-    # tracked_object.estimate: [[xmin, ymin], [xmax, ymax]]
-    
-    det_box = detection.points.flatten() # [xmin, ymin, xmax, ymax]
-    track_box = tracked_object.estimate.flatten() # [xmin, ymin, xmax, ymax]
-    
-    # Calculate intersection
-    ixmin = max(det_box[0], track_box[0])
-    iymin = max(det_box[1], track_box[1])
-    ixmax = min(det_box[2], track_box[2])
-    iymax = min(det_box[3], track_box[3])
-    
-    iw = max(0, ixmax - ixmin)
-    ih = max(0, iymax - iymin)
-    area_intersection = iw * ih
-    
-    # Calculate union
-    area_det = (det_box[2] - det_box[0]) * (det_box[3] - det_box[1])
-    area_track = (track_box[2] - track_box[0]) * (track_box[3] - track_box[1])
-    area_union = area_det + area_track - area_intersection
-    
-    if area_union <= 0:
-        return 1.0
+    try:
+        det_box = detection.points[0] # [xmin, ymin, xmax, ymax]
+        track_box = tracked_object.estimate[0]
         
-    iou_val = area_intersection / area_union
-    return 1.0 - iou_val # Return distance (1 - IoU)
+        # 1. Calculate IoU
+        ixmin = max(det_box[0], track_box[0])
+        iymin = max(det_box[1], track_box[1])
+        ixmax = min(det_box[2], track_box[2])
+        iymax = min(det_box[3], track_box[3])
+        iw = max(0, ixmax - ixmin)
+        ih = max(0, iymax - iymin)
+        area_intersection = iw * ih
+        area_det = (det_box[2] - det_box[0]) * (det_box[3] - det_box[1])
+        area_track = (track_box[2] - track_box[0]) * (track_box[3] - track_box[1])
+        area_union = area_det + area_track - area_intersection
+        iou = area_intersection / area_union if area_union > 0 else 0
+        
+        # 2. Calculate Centroid Distance (Normalized by frame size)
+        det_center = [(det_box[0] + det_box[2]) / 2, (det_box[1] + det_box[3]) / 2]
+        track_center = [(track_box[0] + track_box[2]) / 2, (track_box[1] + track_box[3]) / 2]
+        
+        # Euclidean distance between centers
+        dist = np.sqrt((det_center[0] - track_center[0])**2 + (det_center[1] - track_center[1])**2)
+        
+        # Normalize distance: 0 overlap + huge jump = 1.0 distance
+        if iou > 0:
+            return 1.0 - iou
+        else:
+            return min(0.95, dist / 500.0) 
+            
+    except Exception:
+        return 1.0
 
 class TrackingService:
     _instance = None
@@ -50,37 +58,44 @@ class TrackingService:
         return cls._instance
     
     def _initialize(self):
-        print("Initializing TrackingService (OWL-ViT + Norfair)...")
+        print("Initializing TrackingService (OWL-ViT + Norfair Hybrid)...")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         from app.services.detection_service import detection_service
         self.detection_service = detection_service
         
         self.tracker = Tracker(
-            distance_function=iou,
-            distance_threshold=0.7, # Max distance (1 - IoU) to consider a match
+            distance_function=hybrid_distance,
+            distance_threshold=1.0, 
             initialization_delay=0,
-            hit_counter_max=15,
+            hit_counter_max=100,
             past_detections_length=5
         )
         
         self.current_video_id: Optional[str] = None
+        self.current_query: Optional[str] = None
+
+    def _normalize_id(self, video_id: Optional[str]) -> Optional[str]:
+        if not video_id:
+            return None
+        return video_id.split("/")[-1].split("?")[0]
     
-    def reset_for_new_video(self, video_id: str):
-        if self.current_video_id != video_id:
-            print(f"Resetting tracker for new video: {video_id}")
+    def reset_for_new_video(self, video_id: str, query: str = ""):
+        norm_id = self._normalize_id(video_id)
+        if self.current_video_id != norm_id or self.current_query != query:
+            print(f"Resetting tracker for: Video={norm_id}, Query={query}")
             self.tracker = Tracker(
-                distance_function=iou,
-                distance_threshold=0.7,
+                distance_function=hybrid_distance,
+                distance_threshold=1.0,
                 initialization_delay=0,
-                hit_counter_max=15,
+                hit_counter_max=100,
                 past_detections_length=5
             )
-            self.current_video_id = video_id
+            self.current_video_id = norm_id
+            self.current_query = query
     
     def detect_and_track(self, frame: Image.Image, query: str, return_all_detections: bool = False) -> List[Dict]:
         if Tracker is None:
-            print("Norfair not installed, falling back to raw detection")
             detections = self._detect_multiple(frame, query)
             return [{"track_id": i, "bbox": d["box"], "score": d["score"]} for i, d in enumerate(detections)]
 
@@ -90,40 +105,45 @@ class TrackingService:
         norfair_detections = []
         for det in detections_raw:
             box = det["box"]
-            # Convert to pixel coordinates for stability in distance calculation
-            pixel_box = np.array([
-                [box[0] * width, box[1] * height],
-                [box[2] * width, box[3] * height]
-            ])
-            norfair_detections.append(Detection(points=pixel_box, scores=np.array([det["score"]])))
+            points = np.array([[
+                box[0] * width, 
+                box[1] * height, 
+                box[2] * width, 
+                box[3] * height
+            ]], dtype=np.float32)
+            norfair_detections.append(Detection(points=points, scores=np.array([det["score"]])))
         
-        tracked_objects = self.tracker.update(detections=norfair_detections)
-        
-        results = []
-        for obj in tracked_objects:
-            est = obj.estimate
-            normalized_box = [
-                float(est[0][0] / width),
-                float(est[0][1] / height),
-                float(est[1][0] / width),
-                float(est[1][1] / height)
-            ]
+        try:
+            tracked_objects = self.tracker.update(detections=norfair_detections)
             
-            score = 0.8
-            if obj.last_detection is not None:
-                score = float(obj.last_detection.scores[0])
-            
-            results.append({
-                "track_id": obj.id,
-                "bbox": normalized_box,
-                "score": score
-            })
-            
-        return results
+            results = []
+            for obj in tracked_objects:
+                est = obj.estimate[0]
+                normalized_box = [
+                    float(np.clip(est[0] / width, 0, 1)),
+                    float(np.clip(est[1] / height, 0, 1)),
+                    float(np.clip(est[2] / width, 0, 1)),
+                    float(np.clip(est[3] / height, 0, 1))
+                ]
+                
+                score = 0.8
+                if obj.last_detection is not None:
+                    score = float(obj.last_detection.scores[0])
+                
+                results.append({
+                    "track_id": obj.id,
+                    "bbox": normalized_box,
+                    "score": score
+                })
+                
+            return results
+        except Exception as e:
+            print(f"Tracker update failure: {e}")
+            return [{"track_id": 999, "bbox": d["box"], "score": d["score"]} for d in detections_raw]
     
-    def _detect_multiple(self, frame: Image.Image, query: str, max_detections: int = 10) -> List[Dict]:
+    def _detect_multiple(self, frame: Image.Image, query: str, max_detections: int = 5) -> List[Dict]:
         width, height = frame.size
-        texts = [[f"a photo of a {query}", f"{query}", f"a {query}", f"many {query}", f"all {query}"]]
+        texts = [[f"a {query}", f"{query}"]]
         
         try:
             processor = self.detection_service.processor
@@ -136,41 +156,26 @@ class TrackingService:
             results = processor.image_processor.post_process_object_detection(
                 outputs=outputs,
                 target_sizes=target_sizes,
-                threshold=0.15
+                threshold=0.1 
             )
             
             i = 0
             boxes, scores, labels = results[i]["boxes"], results[i]["scores"], results[i]["labels"]
-            
-            if len(scores) == 0:
-                return []
+            if len(scores) == 0: return []
             
             keep_idx = scores.argsort(descending=True)[:max_detections]
             
             detections = []
             for idx in keep_idx:
                 box = boxes[idx].tolist()
-                score = scores[idx].item()
-                
-                normalized_box = [
-                    box[0] / width,
-                    box[1] / height,
-                    box[2] / width,
-                    box[3] / height
-                ]
-                
                 detections.append({
-                    "box": normalized_box,
-                    "score": score,
-                    "label": labels[idx].item()
+                    "box": [box[0]/width, box[1]/height, box[2]/width, box[3]/height],
+                    "score": scores[idx].item()
                 })
-            
             return detections
-            
         except Exception as e:
-            print(f"Detection error in TrackingService: {e}")
             return []
-    
+
     def process_video_frames(self, frames: List[Image.Image], query: str) -> List[List[Dict]]:
         all_results = []
         for frame in frames:
