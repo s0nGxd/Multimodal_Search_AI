@@ -96,8 +96,9 @@ class SearchService:
             all_vectors.extend([vectors[j] for j in range(len(batch))])
         return all_vectors
 
+    def search(self, query: str, k: int = 20, threshold: float = 0.20) -> list[dict]:
         """Hybrid search using 3 channels fused via Reciprocal Rank Fusion (RRF).
-
+        
         Channels:
           1. Image vector search  — visual similarity (SigLIP image embedding)
           2. Caption vector search — semantic text match (SigLIP text embedding vs caption)
