@@ -197,7 +197,7 @@ class IngestionService:
 
         # Phase 3: Optionally caption (expensive — off by default for bulk)
         import numpy as np
-        zero_vec = np.zeros(512, dtype="float32")
+        zero_vec = np.zeros(EMBED_DIM, dtype="float32")
         records = []
         for i, (photo_id, url, img) in enumerate(downloaded):
             description = ""

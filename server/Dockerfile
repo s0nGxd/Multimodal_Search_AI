@@ -31,7 +31,8 @@ RUN mkdir -p /data/lancedb_db /data/images
 ENV LANCEDB_URI=/data/lancedb_db
 ENV DATA_DIR=/data/images
 ENV PORT=7860
-ENV EMBED_MODEL=openai/clip-vit-base-patch32
+ENV EMBED_MODEL=google/siglip-base-patch16-256
+ENV EMBED_DIM=768
 ENV BACKEND_URL=https://aariz-s-segp-semantic-search.hf.space
 ENV HF_DATASET_REPO=aariz-s/segp-search-data
 
