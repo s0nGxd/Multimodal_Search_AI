@@ -1,4 +1,26 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
+const HEALTH_URL = API_BASE.replace('/api', '/health');
+
+export async function checkBackendHealth(): Promise<boolean> {
+    try {
+        const res = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(5000) });
+        if (!res.ok) return false;
+        const data = await res.json();
+        return data?.status === 'ok';
+    } catch {
+        return false;
+    }
+}
+
+export async function waitForBackend(onAttempt?: (attempt: number) => void): Promise<void> {
+    for (let i = 1; i <= 30; i++) {
+        onAttempt?.(i);
+        const healthy = await checkBackendHealth();
+        if (healthy) return;
+        await new Promise(r => setTimeout(r, 3000));
+    }
+    throw new Error('Backend did not respond after 90 seconds');
+}
 
 export interface IngestResult {
     id: string;

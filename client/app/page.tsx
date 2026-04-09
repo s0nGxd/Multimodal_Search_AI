@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search, Image as ImageIcon, Sparkles, Loader2, ArrowRight, Play } from "lucide-react";
 import Link from "next/link";
-import { searchImages, SearchResult, getVideoFrames, VideoFrame, trackObject, TrackResult } from "@/lib/api";
+import { searchImages, SearchResult, getVideoFrames, VideoFrame, trackObject, TrackResult, checkBackendHealth, waitForBackend } from "@/lib/api";
 
 export default function Home() {
     const [query, setQuery] = useState("");
@@ -21,8 +21,24 @@ export default function Home() {
     const [isDetecting, setIsDetecting] = useState(false);
     const [videoFrames, setVideoFrames] = useState<VideoFrame[]>([]);
     const [currentDescription, setCurrentDescription] = useState("");
+    const [backendReady, setBackendReady] = useState<boolean | null>(null);
 
     const trackStates = useRef<Map<number, { lastBox: number[], lastTime: number }>>(new Map());
+
+    useEffect(() => {
+        let cancelled = false;
+        checkBackendHealth().then(ok => {
+            if (cancelled) return;
+            if (ok) {
+                setBackendReady(true);
+            } else {
+                setBackendReady(false);
+                waitForBackend().then(() => { if (!cancelled) setBackendReady(true); })
+                    .catch(() => { if (!cancelled) setBackendReady(false); });
+            }
+        });
+        return () => { cancelled = true; };
+    }, []);
 
     useEffect(() => {
         if (focusedImage) {
@@ -159,9 +175,29 @@ export default function Home() {
                         animate={{ opacity: 1, y: 0 }}
                         className="mb-8"
                     >
-                        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-400 text-xs font-medium mb-6">
+                        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-400 text-xs font-medium mb-3">
                             <Sparkles className="w-3 h-3" />
                             Next-Gen Semantic Vision
+                        </div>
+                        <div className="mb-6">
+                            {backendReady === null && (
+                                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-gray-500/10 border border-gray-500/20 text-gray-400 text-xs font-medium">
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                    Checking engine status...
+                                </div>
+                            )}
+                            {backendReady === false && (
+                                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 text-xs font-medium">
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                    Waking up search engine — this takes about 30 seconds...
+                                </div>
+                            )}
+                            {backendReady === true && (
+                                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-green-500/10 border border-green-500/20 text-green-400 text-xs font-medium">
+                                    <span className="w-2 h-2 rounded-full bg-green-400" />
+                                    Search engine ready
+                                </div>
+                            )}
                         </div>
                         <h1 className="text-5xl md:text-7xl font-bold tracking-tight mb-4 pb-2 bg-clip-text text-transparent bg-gradient-to-b from-white to-gray-500 leading-tight">
                             Find anything <br /> in your images.
