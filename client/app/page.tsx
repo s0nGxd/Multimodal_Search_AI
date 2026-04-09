@@ -22,20 +22,26 @@ export default function Home() {
     const [videoFrames, setVideoFrames] = useState<VideoFrame[]>([]);
     const [currentDescription, setCurrentDescription] = useState("");
 
-    // --- Advanced Smoothing & Prediction State ---
-    const trackStates = useRef<Map<number, { 
-        lastBox: number[], 
-        lastTime: number, 
-        velocity: number[] 
-    }>>(new Map());
+    const trackStates = useRef<Map<number, { lastBox: number[], lastTime: number }>>(new Map());
 
     useEffect(() => {
         if (focusedImage) {
             setBboxes([]);
             trackStates.current.clear();
             setCurrentDescription(focusedImage.description || "");
+            
             if (focusedImage.video_url) {
                 getVideoFrames(focusedImage.video_url).then(setVideoFrames).catch(console.error);
+            } else {
+                setVideoFrames([]);
+            }
+
+            // TRIGGER INITIAL SCAN FOR IMAGES AND FIRST FRAME
+            if (query && hasSearched) {
+                lastDetectTime.current = 0;
+                trackObject(focusedImage.photo_image_url, query, focusedImage.video_url, focusedImage.video_url)
+                    .then(res => setBboxes(res.tracks || []))
+                    .catch(console.error);
             }
         }
     }, [focusedImage]);
@@ -46,8 +52,6 @@ export default function Home() {
 
         const now = video.currentTime;
 
-        // --- BRAIN: High-Level Identity update (Backend) ---
-        // We poll backend at 0.2s for identity and truth
         if (!isDetecting && Math.abs(now - lastDetectTime.current) >= 0.2) {
             lastDetectTime.current = now;
             setIsDetecting(true);
@@ -78,31 +82,23 @@ export default function Home() {
                         
                         const updatedTracks = result.tracks.map((t: TrackResult) => {
                             const prev = trackStates.current.get(t.track_id);
-                            let velocity = [0, 0, 0, 0];
                             let predictedBox = [...t.bbox];
 
                             if (prev) {
                                 const dt = now - prev.lastTime;
-                                if (dt > 0) {
-                                    // Calculate box velocity
-                                    velocity = t.bbox.map((val, i) => (val - prev.lastBox[i]) / dt);
-                                    
-                                    // PREDICITON: Project the box forward by the measured latency
-                                    // This "pulls" the box from the past into the present
+                                if (dt > 0 && dt < 1.0) {
+                                    const velocity = t.bbox.map((val, i) => (val - prev.lastBox[i]) / dt);
                                     predictedBox = t.bbox.map((val, i) => val + (velocity[i] * latency));
                                 }
                             }
 
-                            trackStates.current.set(t.track_id, { 
-                                lastBox: t.bbox, 
-                                lastTime: now, 
-                                velocity 
-                            });
-
+                            trackStates.current.set(t.track_id, { lastBox: t.bbox, lastTime: now });
                             return { ...t, bbox: predictedBox };
                         });
 
                         setBboxes(updatedTracks);
+                    } else {
+                        setBboxes([]);
                     }
                 }
             } catch (err) {
@@ -112,7 +108,6 @@ export default function Home() {
             }
         }
 
-        // Description Sync
         if (videoFrames.length > 0) {
             let closest = videoFrames[0];
             for (const f of videoFrames) {
@@ -164,13 +159,17 @@ export default function Home() {
                         animate={{ opacity: 1, y: 0 }}
                         className="mb-8"
                     >
-                        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-400 text-xs font-medium mb-6 text-center">
+                        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-400 text-xs font-medium mb-6">
                             <Sparkles className="w-3 h-3" />
-                            Multi-Modal Vision Engine
+                            Next-Gen Semantic Vision
                         </div>
                         <h1 className="text-5xl md:text-7xl font-bold tracking-tight mb-4 pb-2 bg-clip-text text-transparent bg-gradient-to-b from-white to-gray-500 leading-tight">
-                            Smart Semantic <br /> Object Tracking.
+                            Find anything <br /> in your images.
                         </h1>
+                        <p className="text-gray-400 text-lg max-w-xl mx-auto">
+                            Natural language search powered by SigLIP & LanceDB.
+                            Search by concepts, emotions, or objects.
+                        </p>
                     </motion.div>
 
                     <div className="relative max-w-2xl mx-auto group">
@@ -182,7 +181,7 @@ export default function Home() {
                                     type="text"
                                     value={query}
                                     onChange={(e) => setQuery(e.target.value)}
-                                    placeholder="What are you looking for?"
+                                    placeholder="Describe an image... (e.g. 'a person smiling' or 'sunset over mountains')"
                                     className="w-full bg-transparent border-none focus:ring-0 focus:outline-none py-5 px-4 text-white placeholder-gray-600"
                                 />
                                 <button
@@ -225,10 +224,17 @@ export default function Home() {
                                     <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
                                         <div className="flex justify-between items-center mb-1.5">
                                             <p className="text-[10px] text-gray-400 font-mono truncate">{img.photo_id}</p>
-                                            <span className="text-[10px] bg-purple-500/30 border border-purple-500/30 px-1.5 py-0.5 rounded text-purple-300 font-bold uppercase">
-                                                {Math.round(img.score * 100)}% Match
-                                            </span>
+                                            {img.score && (
+                                                <span className="text-[10px] bg-purple-500/30 border border-purple-500/30 px-1.5 py-0.5 rounded text-purple-300 font-medium">
+                                                    {Math.round(img.score * 100)}% Match
+                                                </span>
+                                            )}
                                         </div>
+                                        {img.description && (
+                                            <p className="text-[11px] text-white/90 line-clamp-2 leading-tight bg-black/40 p-2 rounded-lg border border-white/5 backdrop-blur-md italic">
+                                                "{img.description}"
+                                            </p>
+                                        )}
                                     </div>
                                 </motion.div>
                             ))}
@@ -254,7 +260,8 @@ export default function Home() {
                             className="relative max-w-4xl max-h-[85vh] w-full flex flex-col items-center"
                             onClick={(e) => e.stopPropagation()}
                         >
-                            <div className="relative inline-flex items-center justify-center max-h-[70vh] rounded-2xl overflow-hidden shadow-2xl bg-black/50 aspect-video">
+                            {/* REMOVED aspect-video TO FIX PORTRAIT CROPPING */}
+                            <div className="relative inline-flex items-center justify-center max-h-[70vh] rounded-2xl overflow-hidden shadow-2xl bg-black/50">
                                 {focusedImage.video_url ? (
                                     <video
                                         ref={videoRef}
@@ -278,22 +285,22 @@ export default function Home() {
                                     <motion.div
                                         key={box.track_id}
                                         layout
-                                        transition={{ type: "tween", ease: "linear", duration: 0.1 }}
-                                        className="absolute border-[4px] bg-red-500/5 pointer-events-none rounded-lg sm:border-4 transition-all"
+                                        transition={{ type: "tween", ease: "linear", duration: 0.15 }}
+                                        className="absolute border-[3px] bg-red-500/10 pointer-events-none rounded sm:border-4 transition-all"
                                         style={{
                                             left: `${box.bbox[0] * 100}%`,
                                             top: `${box.bbox[1] * 100}%`,
                                             width: `${(box.bbox[2] - box.bbox[0]) * 100}%`,
                                             height: `${(box.bbox[3] - box.bbox[1]) * 100}%`,
-                                            boxShadow: "0 0 25px rgba(239, 68, 68, 0.4)",
+                                            boxShadow: "0 0 15px rgba(239, 68, 68, 0.5)",
                                             borderColor: `hsl(${(box.track_id * 60) % 360}, 80%, 55%)`
                                         }}
                                     >
                                         <span 
-                                            className="absolute -top-8 left-0 text-[10px] font-black px-2 py-1 rounded bg-black/80 uppercase tracking-tighter"
-                                            style={{ color: `hsl(${(box.track_id * 60) % 360}, 80%, 55%)` }}
+                                            className="absolute -top-6 left-0 text-[10px] font-bold px-1 rounded"
+                                            style={{ color: `hsl(${(box.track_id * 60) % 360}, 80%, 55%)`, backgroundColor: "rgba(0,0,0,0.7)" }}
                                         >
-                                            #{box.track_id} Predictive Lock
+                                            #{box.track_id}
                                         </span>
                                     </motion.div>
                                 ))}

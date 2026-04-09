@@ -200,6 +200,7 @@ async def detect_object(req: DetectRequest):
                 r.raise_for_status()
                 img = Image.open(io.BytesIO(r.content)).convert("RGB")
         
+        # USE FULL QUALITY for image detection
         result = detection_service.detect(img, req.query)
         if result:
             return DetectResponse(box=result["box"], score=result["score"])
