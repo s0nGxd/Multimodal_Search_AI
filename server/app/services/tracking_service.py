@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import cv2
 from typing import List, Dict, Optional
 from PIL import Image
 import traceback
@@ -9,40 +10,27 @@ try:
 except ImportError:
     Detection, Tracker = None, None
 
-def hybrid_distance(detection: Detection, tracked_object) -> float:
+def nearest_centroid_distance(detection: Detection, tracked_object) -> float:
     """
-    Hybrid distance: Robust IoU + Scaled Centroid distance.
+    Pure Centroid Distance for high-speed identity persistence.
+    If there is only one 'brown dog', this will 'glue' the ID to it 
+    regardless of how fast it jumps across the screen.
     """
     try:
-        det_box = detection.points[0] # [xmin, ymin, xmax, ymax]
-        track_box = tracked_object.estimate[0]
+        det = detection.points[0] # [xmin, ymin, xmax, ymax]
+        trk = tracked_object.estimate[0]
         
-        # 1. Calculate IoU
-        ixmin = max(det_box[0], track_box[0])
-        iymin = max(det_box[1], track_box[1])
-        ixmax = min(det_box[2], track_box[2])
-        iymax = min(det_box[3], track_box[3])
-        iw = max(0, ixmax - ixmin)
-        ih = max(0, iymax - iymin)
-        area_intersection = iw * ih
-        area_det = (det_box[2] - det_box[0]) * (det_box[3] - det_box[1])
-        area_track = (track_box[2] - track_box[0]) * (track_box[3] - track_box[1])
-        area_union = area_det + area_track - area_intersection
-        iou = area_intersection / area_union if area_union > 0 else 0
+        # Calculate centers
+        det_c = [(det[0] + det[2]) / 2, (det[1] + det[3]) / 2]
+        trk_c = [(trk[0] + trk[2]) / 2, (trk[1] + trk[3]) / 2]
         
-        # 2. Calculate Centroid Distance
-        det_center = [(det_box[0] + det_box[2]) / 2, (det_box[1] + det_box[3]) / 2]
-        track_center = [(track_box[0] + track_box[2]) / 2, (track_box[1] + track_box[3]) / 2]
-        dist = np.sqrt((det_center[0] - track_center[0])**2 + (det_center[1] - track_center[1])**2)
+        # Euclidean distance in pixels
+        dist = np.sqrt((det_c[0] - trk_c[0])**2 + (det_c[1] - trk_c[1])**2)
         
-        # We prioritize IoU. If IoU is low or 0, we use centroid distance.
-        # dist is in pixels. 500.0 is a reasonable normalization for 1080p/4k scaled frames.
-        if iou > 0.1:
-            return 1.0 - iou
-        else:
-            return min(0.95, dist / 500.0) 
-            
-    except Exception:
+        # We use a very high normalization constant (1000 pixels) 
+        # so that almost any movement is 'acceptable' for pairing.
+        return min(1.0, dist / 1000.0)
+    except:
         return 1.0
 
 class TrackingService:
@@ -55,17 +43,17 @@ class TrackingService:
         return cls._instance
     
     def _initialize(self):
-        print("Initializing TrackingService (OWL-ViT + Norfair Optimized)...")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"TrackingService initialized on {self.device}")
         
         from app.services.detection_service import detection_service
         self.detection_service = detection_service
         
         self.tracker = Tracker(
-            distance_function=hybrid_distance,
-            distance_threshold=0.9, # Permissive: allows for faster movement between detections
+            distance_function=nearest_centroid_distance,
+            distance_threshold=0.95, # Extremely permissive: pairing is almost guaranteed to the closest dog
             initialization_delay=0,
-            hit_counter_max=100,    # Robust: wait longer for object to reappear
+            hit_counter_max=150,    # Robust: stay alive for ~3 seconds of missing detections
             past_detections_length=5
         )
         
@@ -79,29 +67,27 @@ class TrackingService:
     def reset_for_new_video(self, video_id: str, query: str = ""):
         norm_id = self._normalize_id(video_id)
         if self.current_video_id != norm_id or self.current_query != query:
-            print(f"Resetting tracker for: Video={norm_id}, Query={query}")
+            print(f"Persistence Lock: New Tracker for {norm_id}")
             self.tracker = Tracker(
-                distance_function=hybrid_distance,
-                distance_threshold=0.9,
+                distance_function=nearest_centroid_distance,
+                distance_threshold=0.95,
                 initialization_delay=0,
-                hit_counter_max=100,
+                hit_counter_max=150,
                 past_detections_length=5
             )
+            self.opencv_trackers = {}
             self.current_video_id = norm_id
             self.current_query = query
     
     def detect_and_track(self, frame: Image.Image, query: str, return_all_detections: bool = False) -> List[Dict]:
-        if Tracker is None:
-            detections = self._detect_multiple(frame, query)
-            return [{"track_id": i, "bbox": d["box"], "score": d["score"]} for i, d in enumerate(detections)]
-
         width, height = frame.size
+        # AI Detection (The Brain)
         detections_raw = self._detect_multiple(frame, query)
         
         norfair_detections = []
         for det in detections_raw:
             box = det["box"]
-            points = np.array([[box[0] * width, box[1] * height, box[2] * width, box[3] * height]], dtype=np.float32)
+            points = np.array([[box[0]*width, box[1]*height, box[2]*width, box[3]*height]], dtype=np.float32)
             norfair_detections.append(Detection(points=points, scores=np.array([det["score"]])))
         
         try:
@@ -115,62 +101,42 @@ class TrackingService:
                     float(np.clip(est[2] / width, 0, 1)),
                     float(np.clip(est[3] / height, 0, 1))
                 ]
-                
-                # Filter out invalid boxes
-                if (normalized_box[2] - normalized_box[0]) < 0.005 or (normalized_box[3] - normalized_box[1]) < 0.005:
-                    continue
+                # Filter noise
+                if (normalized_box[2]-normalized_box[0]) < 0.01: continue
 
-                score = 0.8
-                if obj.last_detection is not None:
-                    score = float(obj.last_detection.scores[0])
-                
+                score = float(obj.last_detection.scores[0]) if obj.last_detection is not None else 0.7
                 results.append({"track_id": obj.id, "bbox": normalized_box, "score": score})
             return results
         except Exception as e:
-            print(f"Tracker error: {e}")
-            return [{"track_id": 999, "bbox": d["box"], "score": d["score"]} for d in detections_raw]
+            return [{"track_id": 1, "bbox": d["box"], "score": d["score"]} for d in detections_raw]
     
-    def _detect_multiple(self, frame: Image.Image, query: str, max_detections: int = 5) -> List[Dict]:
+    def _detect_multiple(self, frame: Image.Image, query: str, max_detections: int = 1) -> List[Dict]:
+        # Optimization: Only track the #1 best match to prevent ID clutter
         width, height = frame.size
-        # Minimal query for speed
         texts = [[f"a photo of a {query}", f"{query}"]]
-        
         try:
             processor = self.detection_service.processor
             model = self.detection_service.model
-            
             inputs = processor(text=texts, images=frame, return_tensors="pt").to(self.device)
             with torch.no_grad():
                 outputs = model(**inputs)
             
             target_sizes = torch.tensor([[height, width]]).to(self.device)
             results = processor.image_processor.post_process_object_detection(
-                outputs=outputs,
-                target_sizes=target_sizes,
-                threshold=0.15 # Better balance: catches blurry dog but ignores background noise
+                outputs=outputs, target_sizes=target_sizes, threshold=0.10 
             )
             
             i = 0
             boxes, scores = results[i]["boxes"], results[i]["scores"]
             if len(scores) == 0: return []
             
-            keep_idx = scores.argsort(descending=True)[:max_detections]
-            detections = []
-            for idx in keep_idx:
-                box = boxes[idx].tolist()
-                detections.append({
-                    "box": [box[0]/width, box[1]/height, box[2]/width, box[3]/height],
-                    "score": scores[idx].item()
-                })
-            return detections
+            best_idx = scores.argmax().item()
+            box = boxes[best_idx].tolist()
+            return [{"box": [box[0]/width, box[1]/height, box[2]/width, box[3]/height], "score": scores[best_idx].item()}]
         except Exception:
             return []
 
     def process_video_frames(self, frames: List[Image.Image], query: str) -> List[List[Dict]]:
-        all_results = []
-        for frame in frames:
-            result = self.detect_and_track(frame, query)
-            all_results.append(result)
-        return all_results
+        return [self.detect_and_track(f, query) for f in frames]
 
 tracking_service = TrackingService()
