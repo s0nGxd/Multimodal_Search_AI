@@ -49,6 +49,22 @@ async def ingest_url(req: URLIngestRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.delete("/images/{photo_id}")
+async def delete_image(photo_id: str):
+    try:
+        table = search_service.table
+        if table is None:
+            raise HTTPException(status_code=404, detail="No images indexed yet")
+        table.delete(f"photo_id = '{photo_id}'")
+        search_service.refresh_table()
+        from app.services.persistence_service import sync_to_repo
+        sync_to_repo()
+        return {"status": "deleted", "photo_id": photo_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.delete("/clear-db")
 async def clear_database():
     try:
