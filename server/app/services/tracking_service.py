@@ -139,19 +139,50 @@ class TrackingService:
             boxes = boxes[keep][:max_detections]
             scores = scores[keep][:max_detections]
             
+            final_indices = []
+            boxes_list = boxes.tolist()
+            
+            # --- CONTAINMENT FILTER (Anti-Nested Boxes) ---
+            # We check every box against every other box.
+            # If box A is mostly inside box B, discard the lower-scoring one.
+            for i in range(len(boxes_list)):
+                is_contained = False
+                a = boxes_list[i]
+                area_a = (a[2] - a[0]) * (a[3] - a[1])
+                
+                for j in range(len(boxes_list)):
+                    if i == j: continue
+                    b = boxes_list[j]
+                    
+                    # Calculate intersection
+                    ixmin = max(a[0], b[0]); iymin = max(a[1], b[1])
+                    ixmax = min(a[2], b[2]); iymax = min(a[3], b[3])
+                    iw = max(0, ixmax - ixmin); ih = max(0, iymax - iymin)
+                    inter_area = iw * ih
+                    
+                    # Intersection over Smallest Area (Containment Ratio)
+                    # If 80% of box A is inside box B, it's redundant.
+                    if area_a > 0 and (inter_area / area_a) > 0.80:
+                        # Only discard if j has a higher score
+                        if scores[j] >= scores[i]:
+                            is_contained = True
+                            break
+                
+                if not is_contained:
+                    final_indices.append(i)
+
             detections = []
-            for b, s in zip(boxes, scores):
-                box = b.tolist()
+            for idx in final_indices:
+                box = boxes_list[idx]
                 norm_box = [box[0]/width, box[1]/height, box[2]/width, box[3]/height]
                 
-                # Filter out logically impossible or tiny redundant boxes
-                # (e.g. boxes smaller than 2% of the screen width)
+                # Filter tiny noise
                 w = norm_box[2] - norm_box[0]
                 if w < 0.02: continue
 
                 detections.append({
                     "box": norm_box,
-                    "score": s.item()
+                    "score": scores[idx].item()
                 })
             return detections
         except Exception:

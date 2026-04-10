@@ -202,6 +202,7 @@ class SearchService:
                         det = detection_service.detect(img, query)
                         if det:
                             score = det.get("score", 0)
+                            best_row[pid]["_detection_score"] = score # Store raw score for dynamic scaling
                             if score > 0.15:
                                 rrf_scores[pid] += (score * 10.0)
                             elif score > 0.05:
@@ -231,28 +232,48 @@ class SearchService:
                 seen_videos.add(v_url)
                 
             dist = float(row.get("_distance", 1.0))
-            is_bm25 = row.get("_bm25_found", False)
+            det_score = float(row.get("_detection_score", 0.0))
+
+            # --- TIERED KEYWORD MATCHING ---
+            desc = row.get("description", "").lower()
+            norm_query = query.strip().lower()
+            q_words = [w.lower() for w in norm_query.split() if len(w) > 2]
+
+            is_full_match = row.get("_bm25_found", False) or (norm_query in desc)
             
-            # 1. Base Score from SigLIP (Most accurate for fine details like color)
-            base_sim = rescale_dist(dist)
+            # Calculate Proportional Match Ratio (Matched Words / Total Words)
+            matched_words = [w for w in q_words if w in desc]
+            match_ratio = len(matched_words) / len(q_words) if q_words else 0.0
+
+            # 1. Base Score from SigLIP (Visual Foundation)
+            final_sim = rescale_dist(dist)
+
+            # 2. ASYMPTOTIC BOOSTING (Gap Closure Math)
             
-            # 2. Multiplicative Bonuses (Order: Detection -> Description)
-            final_sim = base_sim
-            
-            # PHYSICAL DETECTION (OWL-ViT) FIRST
-            # High RRF score means the object was physically verified by OWL-ViT
-            if rrf_scores[pid] >= 1.0:
-                final_sim *= 1.15
-            
-            # DESCRIPTION MATCH (BM25) SECOND (Higher Importance)
-            if is_bm25:
-                # 1.40x multiplier makes textual matches very powerful
-                final_sim *= 1.40
-                # Ensure a minimum 75% for exact filename/text hits
-                final_sim = max(final_sim, 0.75)
-            
-            # Cap at 99% unless it's a perfect bit-for-bit match
-            final_sim = min(0.99, final_sim)
+            # PHYSICAL DETECTION (OWL-ViT) - High Weight (80% gap closure)
+            if det_score > 0.10:
+                # If OWL-ViT is confident (e.g. 0.70 for brown dog), close 80% of the gap
+                # based on that confidence.
+                detection_weight = 0.80 * det_score
+                final_sim += (1.0 - final_sim) * detection_weight
+            elif rrf_scores[pid] >= 1.0:
+                # Small generic boost if channels agree
+                final_sim += (1.0 - final_sim) * 0.10
+
+            # DESCRIPTION MATCH (Textual Bonus) - Lower Weight
+            if is_full_match:
+                # Full Phrase Match: Close 60% of the remaining gap
+                final_sim += (1.0 - final_sim) * 0.60
+            elif match_ratio > 0:
+                # Partial Match: Close 35% of the remaining gap based on match ratio
+                final_sim += (1.0 - final_sim) * (0.35 * match_ratio)
+
+            # No hard floors (max calls) anymore. 
+            # This allows the SigLIP color penalty to actually lower the score.
+
+            # Cap at 99.9%
+            final_sim = min(0.999, final_sim)
+
             
             if final_sim < threshold:
                 continue
