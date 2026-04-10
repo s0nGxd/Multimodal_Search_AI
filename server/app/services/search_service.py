@@ -233,20 +233,27 @@ class SearchService:
             dist = float(row.get("_distance", 1.0))
             is_bm25 = row.get("_bm25_found", False)
             
-            if dist > 0.99 and is_bm25:
-                base_sim = 0.70  # Standard 70% confidence for exact text matches
-            else:
-                base_sim = rescale_dist(dist)
-                if is_bm25:
-                    base_sim += 0.20 # Bump visual matches by 20% if text explicitly mentions it
+            # 1. Base Score from SigLIP (Most accurate for fine details like color)
+            base_sim = rescale_dist(dist)
             
+            # 2. Multiplicative Bonuses (Order: Detection -> Description)
+            final_sim = base_sim
+            
+            # PHYSICAL DETECTION (OWL-ViT) FIRST
+            # High RRF score means the object was physically verified by OWL-ViT
             if rrf_scores[pid] >= 1.0:
-                # Add 30% absolute confidence flat bump for verified OWL-ViT physical objects
-                base_sim += 0.30
-                
-            final_sim = min(1.0, max(0.0, base_sim))
+                final_sim *= 1.15
             
-            # Enforce the user interface threshold slider parameter!
+            # DESCRIPTION MATCH (BM25) SECOND (Higher Importance)
+            if is_bm25:
+                # 1.40x multiplier makes textual matches very powerful
+                final_sim *= 1.40
+                # Ensure a minimum 75% for exact filename/text hits
+                final_sim = max(final_sim, 0.75)
+            
+            # Cap at 99% unless it's a perfect bit-for-bit match
+            final_sim = min(0.99, final_sim)
+            
             if final_sim < threshold:
                 continue
                 

@@ -1,27 +1,6 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
 const HEALTH_URL = API_BASE.replace('/api', '/health');
 
-export async function checkBackendHealth(): Promise<boolean> {
-    try {
-        const res = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(5000) });
-        if (!res.ok) return false;
-        const data = await res.json();
-        return data?.status === 'ok';
-    } catch {
-        return false;
-    }
-}
-
-export async function waitForBackend(onAttempt?: (attempt: number) => void): Promise<void> {
-    for (let i = 1; i <= 30; i++) {
-        onAttempt?.(i);
-        const healthy = await checkBackendHealth();
-        if (healthy) return;
-        await new Promise(r => setTimeout(r, 3000));
-    }
-    throw new Error('Backend did not respond after 90 seconds');
-}
-
 export interface IngestResult {
     id: string;
     url: string;
@@ -52,6 +31,27 @@ export interface TrackResult {
 export interface VideoFrame {
     timestamp: number;
     description: string;
+}
+
+export async function checkBackendHealth(): Promise<boolean> {
+    try {
+        const res = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(5000) });
+        if (!res.ok) return false;
+        const data = await res.json();
+        return data?.status === 'ok';
+    } catch {
+        return false;
+    }
+}
+
+export async function waitForBackend(onAttempt?: (attempt: number) => void): Promise<void> {
+    for (let i = 1; i <= 30; i++) {
+        onAttempt?.(i);
+        const healthy = await checkBackendHealth();
+        if (healthy) return;
+        await new Promise(r => setTimeout(r, 3000));
+    }
+    throw new Error('Backend did not respond after 90 seconds');
 }
 
 export async function searchImages(query: string, k: number = 20, threshold: number = 0.20): Promise<SearchResult[]> {
@@ -105,6 +105,14 @@ export async function getVideoFrames(videoUrl: string): Promise<VideoFrame[]> {
 export async function listAllImages(): Promise<SearchResult[]> {
     const res = await fetch(`${API_BASE}/images/all`);
     if (!res.ok) throw new Error('Failed to fetch images');
+    return res.json();
+}
+
+export async function deleteImage(photo_id: string) {
+    const res = await fetch(`${API_BASE}/images/${photo_id}`, {
+        method: 'DELETE',
+    });
+    if (!res.ok) throw new Error('Delete failed');
     return res.json();
 }
 

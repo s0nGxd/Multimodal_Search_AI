@@ -12,7 +12,7 @@ export default function Home() {
     const [loading, setLoading] = useState(false);
     const [hasSearched, setHasSearched] = useState(false);
     const [resultCount, setResultCount] = useState(20);
-    const [minSimilarity, setMinSimilarity] = useState(0.2);
+    const [minSimilarity, setMinSimilarity] = useState(0.8);
     const [showSettings, setShowSettings] = useState(false);
     const [focusedImage, setFocusedImage] = useState<SearchResult | null>(null);
     const [bboxes, setBboxes] = useState<TrackResult[]>([]);
@@ -21,9 +21,9 @@ export default function Home() {
     const [isDetecting, setIsDetecting] = useState(false);
     const [videoFrames, setVideoFrames] = useState<VideoFrame[]>([]);
     const [currentDescription, setCurrentDescription] = useState("");
+    
+    // --- Backend Readiness State ---
     const [backendReady, setBackendReady] = useState<boolean | null>(null);
-
-    const trackStates = useRef<Map<number, { lastBox: number[], lastTime: number }>>(new Map());
 
     useEffect(() => {
         let cancelled = false;
@@ -40,6 +40,8 @@ export default function Home() {
         return () => { cancelled = true; };
     }, []);
 
+    const trackStates = useRef<Map<number, { lastBox: number[], lastTime: number }>>(new Map());
+
     useEffect(() => {
         if (focusedImage) {
             setBboxes([]);
@@ -52,9 +54,10 @@ export default function Home() {
                 setVideoFrames([]);
             }
 
-            // TRIGGER INITIAL SCAN FOR IMAGES AND FIRST FRAME
+            // TRIGGER INITIAL SCAN: Fix for static images and background objects
             if (query && hasSearched) {
                 lastDetectTime.current = 0;
+                // We use the original high-res URL for the initial static scan
                 trackObject(focusedImage.photo_image_url, query, focusedImage.video_url, focusedImage.video_url)
                     .then(res => setBboxes(res.tracks || []))
                     .catch(console.error);
@@ -104,7 +107,11 @@ export default function Home() {
                                 const dt = now - prev.lastTime;
                                 if (dt > 0 && dt < 1.0) {
                                     const velocity = t.bbox.map((val, i) => (val - prev.lastBox[i]) / dt);
-                                    predictedBox = t.bbox.map((val, i) => val + (velocity[i] * latency));
+                                    
+                                    // DAMPED PREDICTION: We reduce the prediction weight (0.4) 
+                                    // to prevent the box from "overshooting" when objects stop suddenly.
+                                    const DAMPING = 0.4;
+                                    predictedBox = t.bbox.map((val, i) => val + (velocity[i] * latency * DAMPING));
                                 }
                             }
 
@@ -141,6 +148,7 @@ export default function Home() {
         if (!query.trim()) return;
         setLoading(true);
         try {
+            // FIXED: Slider value now matches image preview percentage 1-to-1
             const data = await searchImages(query, resultCount, minSimilarity);
             setResults(data);
             setHasSearched(true);
@@ -175,30 +183,44 @@ export default function Home() {
                         animate={{ opacity: 1, y: 0 }}
                         className="mb-8"
                     >
-                        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-400 text-xs font-medium mb-3">
+                        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-400 text-xs font-medium mb-6">
                             <Sparkles className="w-3 h-3" />
                             Next-Gen Semantic Vision
                         </div>
-                        <div className="mb-6">
+
+                        <div className="mb-6 flex justify-center">
                             {backendReady === null && (
-                                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-gray-500/10 border border-gray-500/20 text-gray-400 text-xs font-medium">
+                                <motion.div
+                                    initial={{ opacity: 0, y: -10 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-gray-500/10 border border-gray-500/20 text-gray-400 text-xs font-medium"
+                                >
                                     <Loader2 className="w-3 h-3 animate-spin" />
                                     Checking engine status...
-                                </div>
+                                </motion.div>
                             )}
                             {backendReady === false && (
-                                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 text-xs font-medium">
+                                <motion.div
+                                    initial={{ opacity: 0, y: -10 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 text-xs font-medium"
+                                >
                                     <Loader2 className="w-3 h-3 animate-spin" />
                                     Waking up search engine — this takes about 30 seconds...
-                                </div>
+                                </motion.div>
                             )}
                             {backendReady === true && (
-                                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-green-500/10 border border-green-500/20 text-green-400 text-xs font-medium">
+                                <motion.div
+                                    initial={{ opacity: 0, y: -10 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-green-500/10 border border-green-500/20 text-green-400 text-xs font-medium"
+                                >
                                     <span className="w-2 h-2 rounded-full bg-green-400" />
                                     Search engine ready
-                                </div>
+                                </motion.div>
                             )}
                         </div>
+
                         <h1 className="text-5xl md:text-7xl font-bold tracking-tight mb-4 pb-2 bg-clip-text text-transparent bg-gradient-to-b from-white to-gray-500 leading-tight">
                             Find anything <br /> in your images.
                         </h1>
@@ -222,13 +244,72 @@ export default function Home() {
                                 />
                                 <button
                                     type="submit"
-                                    disabled={loading}
+                                    disabled={loading || !backendReady}
                                     className="mr-2 px-6 py-2.5 bg-white text-black font-bold rounded-xl hover:bg-gray-200 transition-all active:scale-95 disabled:opacity-50"
                                 >
                                     {loading ? <Loader2 className="animate-spin w-5 h-5" /> : "Search"}
                                 </button>
                             </div>
                         </form>
+
+                        <div className="mt-4 flex justify-center">
+                            <button
+                                onClick={() => setShowSettings(!showSettings)}
+                                className="text-xs text-gray-500 hover:text-white flex items-center gap-1 transition-colors"
+                            >
+                                {showSettings ? "Hide Options" : "Advanced Search Options"}
+                                <span className={`transform transition-transform ${showSettings ? 'rotate-180' : ''}`}>▼</span>
+                            </button>
+                        </div>
+
+                        <AnimatePresence>
+                            {showSettings && (
+                                <motion.div
+                                    initial={{ opacity: 0, height: 0 }}
+                                    animate={{ opacity: 1, height: 'auto' }}
+                                    exit={{ opacity: 0, height: 0 }}
+                                    className="overflow-hidden"
+                                >
+                                    <div className="bg-white/5 border border-white/5 rounded-xl p-4 mt-2 grid grid-cols-2 gap-6 text-left">
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-2 font-medium">
+                                                Max Results: <span className="text-white">{resultCount}</span>
+                                            </label>
+                                            <input
+                                                type="range"
+                                                min="1"
+                                                max="50"
+                                                value={resultCount}
+                                                onChange={(e) => setResultCount(parseInt(e.target.value))}
+                                                className="w-full h-1.5 bg-white/10 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white"
+                                            />
+                                            <div className="flex justify-between text-[10px] text-gray-600 mt-1">
+                                                <span>1</span>
+                                                <span>50</span>
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-2 font-medium">
+                                                Min Similarity: <span className="text-white">{Math.round(minSimilarity * 100)}%</span>
+                                            </label>
+                                            <input
+                                                type="range"
+                                                min="0"
+                                                max="100"
+                                                step="5"
+                                                value={minSimilarity * 100}
+                                                onChange={(e) => setMinSimilarity(parseInt(e.target.value) / 100)}
+                                                className="w-full h-1.5 bg-white/10 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white"
+                                            />
+                                            <div className="flex justify-between text-[10px] text-gray-600 mt-1">
+                                                <span>0%</span>
+                                                <span>Strict</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
                     </div>
                 </div>
 
@@ -296,7 +377,6 @@ export default function Home() {
                             className="relative max-w-4xl max-h-[85vh] w-full flex flex-col items-center"
                             onClick={(e) => e.stopPropagation()}
                         >
-                            {/* REMOVED aspect-video TO FIX PORTRAIT CROPPING */}
                             <div className="relative inline-flex items-center justify-center max-h-[70vh] rounded-2xl overflow-hidden shadow-2xl bg-black/50">
                                 {focusedImage.video_url ? (
                                     <video
@@ -315,7 +395,11 @@ export default function Home() {
                                         onTimeUpdate={handleTimeUpdate}
                                     />
                                 ) : (
-                                    <img src={focusedImage.photo_image_url} className="max-h-[70vh] w-auto" />
+                                    <img
+                                        src={focusedImage.photo_image_url}
+                                        alt={focusedImage.photo_id}
+                                        className="max-h-[70vh] w-auto"
+                                    />
                                 )}
                                 {bboxes.map((box) => (
                                     <motion.div

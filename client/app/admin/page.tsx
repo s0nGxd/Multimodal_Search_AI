@@ -2,9 +2,9 @@
 
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Upload, CheckCircle, AlertCircle, Loader2, Database, ArrowLeft, Image as ImageIcon, X, FileImage, Play } from "lucide-react";
+import { Upload, CheckCircle, AlertCircle, Loader2, Database, ArrowLeft, Image as ImageIcon, X, FileImage, Play, Trash2 } from "lucide-react";
 import Link from "next/link";
-import { uploadImage, bulkIngest, ingestViaUrl, listAllImages, SearchResult, getVideoFrames, VideoFrame } from "@/lib/api";
+import { uploadImage, bulkIngest, ingestViaUrl, listAllImages, SearchResult, getVideoFrames, VideoFrame, deleteImage } from "@/lib/api";
 
 export default function AdminPage() {
     const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -62,6 +62,21 @@ export default function AdminPage() {
             setIsAuthenticated(true);
         } else {
             alert("Invalid password");
+        }
+    };
+
+    const handleDelete = async (photo_id: string, e?: React.MouseEvent) => {
+        if (e) e.stopPropagation();
+        if (!confirm("Are you sure you want to delete this record?")) return;
+        
+        try {
+            await deleteImage(photo_id);
+            setAllImages(prev => prev.filter(img => img.photo_id !== photo_id));
+            if (focusedImage?.photo_id === photo_id) setFocusedImage(null);
+            setStatus("success");
+            setMessage("Record deleted successfully");
+        } catch (e: any) {
+            alert("Delete failed: " + e.message);
         }
     };
 
@@ -150,7 +165,7 @@ export default function AdminPage() {
         setIsBulkIndexing(true);
         setStatus("idle");
         try {
-            const result = await bulkIngest(10); // Batch of 10 for speed
+            const result = await bulkIngest(10); 
             setStatus("success");
             setMessage(`Bulk ingestion complete: Processed ${result.processed} images.`);
         } catch (e: any) {
@@ -212,10 +227,7 @@ export default function AdminPage() {
                 </header>
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                    {/* Main Actions Area */}
                     <div className="lg:col-span-2 space-y-8">
-
-                        {/* Tabs */}
                         <div className="flex p-1 bg-white/5 border border-white/5 rounded-2xl w-fit">
                             {[
                                 { id: "file", label: "File Upload", icon: Upload },
@@ -249,7 +261,6 @@ export default function AdminPage() {
                                         )}
                                     </div>
 
-                                    {/* Drop Zone */}
                                     <div
                                         onDragOver={handleDragOver}
                                         onDragLeave={handleDragLeave}
@@ -288,7 +299,6 @@ export default function AdminPage() {
                                         </label>
                                     </div>
 
-                                    {/* File Queue */}
                                     {fileQueue.length > 0 && (
                                         <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
                                             {fileQueue.map((item, idx) => (
@@ -302,7 +312,6 @@ export default function AdminPage() {
                                                         <p className="text-sm text-white truncate">{item.file.name}</p>
                                                         <p className="text-xs text-gray-500">{(item.file.size / 1024).toFixed(1)} KB</p>
                                                     </div>
-                                                    {/* Status badge */}
                                                     {item.status === "pending" && (
                                                         <span className="text-xs px-2 py-0.5 rounded-full bg-white/10 text-gray-400 shrink-0">Pending</span>
                                                     )}
@@ -430,6 +439,14 @@ export default function AdminPage() {
                                                         </div>
                                                     </div>
                                                 )}
+                                                
+                                                <button
+                                                    onClick={(e) => handleDelete(img.photo_id, e)}
+                                                    className="absolute top-2 right-2 p-2 bg-red-500/80 rounded-lg text-white opacity-0 group-hover:opacity-100 transition-all hover:bg-red-600 z-30 shadow-lg"
+                                                >
+                                                    <Trash2 className="w-4 h-4" />
+                                                </button>
+
                                                 <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-3 z-20">
                                                     <p className="text-[10px] text-gray-400 font-mono truncate">{img.photo_id}</p>
                                                     {img.description && (
@@ -442,7 +459,6 @@ export default function AdminPage() {
                                 </motion.div>
                             )}
 
-                            {/* Status Feed */}
                             <AnimatePresence>
                                 {status !== "idle" && (
                                     <motion.div
@@ -460,7 +476,6 @@ export default function AdminPage() {
                         </div>
                     </div>
 
-                    {/* Sidebar Stats */}
                     <div className="space-y-8">
                         <section className="p-8 rounded-3xl bg-white/5 border border-white/10">
                             <h2 className="text-xl font-semibold mb-6">Engine Heartbeat</h2>
@@ -500,7 +515,6 @@ export default function AdminPage() {
                 </div>
             </div>
 
-            {/* Image Lightbox */}
             <AnimatePresence>
                 {focusedImage && (
                     <motion.div
@@ -552,8 +566,16 @@ export default function AdminPage() {
                                     />
                                 )}
                             </div>
-                            <div className="mt-4 w-full max-w-2xl text-center space-y-2">
-                                <p className="text-xs text-gray-500 font-mono">{focusedImage.photo_id}</p>
+                            <div className="mt-4 w-full max-w-2xl text-center flex flex-col items-center gap-2">
+                                <div className="flex items-center gap-4">
+                                    <p className="text-xs text-gray-500 font-mono">{focusedImage.photo_id}</p>
+                                    <button 
+                                        onClick={() => handleDelete(focusedImage.photo_id)}
+                                        className="flex items-center gap-1.5 px-3 py-1 bg-red-500/20 border border-red-500/30 rounded-full text-red-400 text-[10px] font-bold hover:bg-red-500 hover:text-white transition-all"
+                                    >
+                                        <Trash2 className="w-3 h-3" /> DELETE RECORD
+                                    </button>
+                                </div>
                                 {currentDescription && (
                                     <p className="text-sm text-white/90 bg-white/5 border border-white/10 rounded-xl px-4 py-3 italic">
                                         "{currentDescription}"

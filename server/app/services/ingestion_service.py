@@ -49,17 +49,33 @@ class IngestionService:
         self.data_dir.mkdir(exist_ok=True)
 
     def process_upload(self, file_contents: bytes, filename: str):
-        file_path = self.data_dir / filename
+        # 1. Check if this file (by original stem) already exists in DB
+        # This prevents re-indexing the same file multiple times
+        original_id = Path(filename).stem
+        if search_service.table is not None:
+            df = search_service.table.to_pandas()
+            # Check if photo_id or video_url contains this stem
+            exists = any(df['photo_id'] == original_id) or any(df['video_url'].str.contains(filename, na=False))
+            if exists:
+                print(f"Skipping {filename}: already exists in database.")
+                return {"id": original_id, "status": "skipped", "message": "Already exists"}
+
+        # 2. Generate unique filename for storage safety
+        timestamp = int(pd.Timestamp.now().timestamp())
+        path_obj = Path(filename)
+        unique_filename = f"{path_obj.stem}_{timestamp}{path_obj.suffix}"
+        
+        file_path = self.data_dir / unique_filename
         with open(file_path, "wb") as f:
             f.write(file_contents)
 
         import mimetypes
-        mime_type, _ = mimetypes.guess_type(filename)
-        ext = Path(filename).suffix.lower()
+        mime_type, _ = mimetypes.guess_type(unique_filename)
+        ext = path_obj.suffix.lower()
         is_video = (mime_type and mime_type.startswith("video/")) or ext in [".mp4", ".mov", ".avi", ".webm", ".mkv"]
 
         if is_video:
-            return self._process_video_upload(file_path, filename)
+            return self._process_video_upload(file_path, unique_filename)
 
         try:
             img = Image.open(file_path).convert("RGB")
