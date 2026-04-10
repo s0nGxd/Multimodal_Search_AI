@@ -490,7 +490,7 @@ export default function AdminPage() {
                                 </div>
                                 <div className="flex justify-between items-center group">
                                     <span className="text-gray-500 group-hover:text-gray-400 transition-colors">Dimension</span>
-                                    <span className="text-sm font-mono">768</span>
+                                    <span className="text-sm font-mono">768-dim</span>
                                 </div>
                             </div>
 
