@@ -1,26 +1,92 @@
-# --- 1. Python & Environment ---
+# ============================================================
+# ROOT .gitignore — covers the entire monorepo
+# ============================================================
+
+# ── Python: Virtual Environments ────────────────────────────
+.venv/
+.venv2/
+venv/
+venv*/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# ── Python: Bytecode & Cache ─────────────────────────────────
 __pycache__/
 *.py[cod]
-.venv/
-venv/
-env/
-.env
+*.pyo
+*.pyd
+.Python
 
-# --- 2. Large Data & Images ---
-# Ignore the actual images you downloaded (too large for GitHub)
-images/
-# Ignore the raw Unsplash metadata files
+# ── Python: Testing & Coverage ───────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ── Node.js / Next.js ────────────────────────────────────────
+node_modules/
+.next/
+out/
+.cache/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── Database & Vector Store ───────────────────────────────────
+lancedb_db/
+server/lancedb_db/
+*.lance/
+*.db
+*.sqlite3
+
+# ── Uploaded / Ingested Images ───────────────────────────────
+server/data/
 data/
-*.csv*
-*.tsv*
+images/
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.gif
+*.tif
+*.tiff
+*.bmp
+
+# ── Dataset Files ─────────────────────────────────────────────
+*.csv
+*.tsv
+*.parquet
+*.arrow
 photos.csv000
 
-# --- 3. Database ---
-# Ignore the local LanceDB database folder
-lancedb_data/
-*.lance/
+# ── Secrets & Environment ─────────────────────────────────────
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+# (keep .env.example — it documents required vars without exposing values)
 
-# --- 4. OS & IDE ---
+# ── OS & Editor Junk ─────────────────────────────────────────
 .DS_Store
-.vscode/
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
 .idea/
+.vscode/settings.json
+.vscode/launch.json
+
+# ── Jupyter Notebooks ─────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── HuggingFace Model Cache (can be very large) ───────────────
+~/.cache/huggingface/
+.cache/

@@ -1,0 +1,33 @@
+# Core AI/ML
+transformers>=4.44.0
+safetensors>=0.4.0
+torch>=2.3.0
+torchvision>=0.18.0
+
+# Vector Database
+lancedb>=0.9.0
+lance>=0.15.0
+
+# Data Processing
+pyarrow>=15.0.0
+pillow>=10.4.0
+numpy>=1.26.0
+pandas
+
+# Web Framework
+fastapi>=0.109.0
+uvicorn>=0.27.0
+python-multipart>=0.0.9
+
+# Auth (future use)
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+
+# Utilities
+python-dotenv>=1.0.1
+requests
+huggingface-hub>=0.20.0
+sentencepiece
+opencv-contrib-python-headless>=4.9.0
+protobuf
+norfair
