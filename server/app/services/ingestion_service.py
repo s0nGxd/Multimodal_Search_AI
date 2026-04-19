@@ -9,27 +9,18 @@ import pandas as pd
 from PIL import Image
 import lancedb
 from lancedb.pydantic import LanceModel, Vector
-from dotenv import load_dotenv
 
 from .search_service import search_service
 from .caption_service import caption_service
 from .persistence_service import sync_to_repo
 
-load_dotenv()
-
-# Must match the embedding dimension of the configured model.
-# SigLIP base-patch16-256 (default) → 768. CLIP base-patch32 → 512.
-EMBED_DIM = int(os.getenv("EMBED_DIM", "768"))
-
 
 class ImageRecord(LanceModel):
     photo_id: str
     photo_image_url: str
-    video_url: str = ""
-    timestamp: float = 0.0
     description: str = ""
-    vector: Vector(EMBED_DIM)
-    caption_vector: Vector(EMBED_DIM)
+    vector: Vector(512)
+    caption_vector: Vector(512)
 
 
 def _download_image(photo_id: str, url: str, timeout: int = 10) -> tuple[str, str, Image.Image | None]:
@@ -49,33 +40,9 @@ class IngestionService:
         self.data_dir.mkdir(exist_ok=True)
 
     def process_upload(self, file_contents: bytes, filename: str):
-        # 1. Check if this file (by original stem) already exists in DB
-        # This prevents re-indexing the same file multiple times
-        original_id = Path(filename).stem
-        if search_service.table is not None:
-            df = search_service.table.to_pandas()
-            # Check if photo_id or video_url contains this stem
-            exists = any(df['photo_id'] == original_id) or any(df['video_url'].str.contains(filename, na=False))
-            if exists:
-                print(f"Skipping {filename}: already exists in database.")
-                return {"id": original_id, "status": "skipped", "message": "Already exists"}
-
-        # 2. Generate unique filename for storage safety
-        timestamp = int(pd.Timestamp.now().timestamp())
-        path_obj = Path(filename)
-        unique_filename = f"{path_obj.stem}_{timestamp}{path_obj.suffix}"
-        
-        file_path = self.data_dir / unique_filename
+        file_path = self.data_dir / filename
         with open(file_path, "wb") as f:
             f.write(file_contents)
-
-        import mimetypes
-        mime_type, _ = mimetypes.guess_type(unique_filename)
-        ext = path_obj.suffix.lower()
-        is_video = (mime_type and mime_type.startswith("video/")) or ext in [".mp4", ".mov", ".avi", ".webm", ".mkv"]
-
-        if is_video:
-            return self._process_video_upload(file_path, unique_filename)
 
         try:
             img = Image.open(file_path).convert("RGB")
@@ -99,65 +66,6 @@ class IngestionService:
         self._insert_records([record])
         sync_to_repo()
         return {"id": file_path.stem, "url": photo_url, "description": description, "status": "indexed"}
-
-    def _process_video_upload(self, file_path: Path, filename: str):
-        import cv2
-        cap = cv2.VideoCapture(str(file_path))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps <= 0:
-            fps = 30
-        
-        frames_to_extract = []
-        frame_interval = int(fps * 2) # 1 frame every 2 seconds
-        
-        count = 0
-        success, frame = cap.read()
-        while success:
-            if count % frame_interval == 0:
-                frames_to_extract.append((count, frame))
-            success, frame = cap.read()
-            count += 1
-        cap.release()
-        
-        if not frames_to_extract:
-            if file_path.exists():
-                os.remove(file_path)
-            raise ValueError("Could not extract any frames from the video")
-            
-        records = []
-        for frame_idx, frame_data in frames_to_extract:
-            frame_rgb = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(frame_rgb)
-            
-            frame_filename = f"{file_path.stem}_frame_{frame_idx}.jpg"
-            frame_path = self.data_dir / frame_filename
-            img.save(frame_path)
-            
-            vector = search_service.embed_image(img)
-            description = caption_service.generate_caption(img)
-            caption_vector = search_service.embed_text(description)
-            
-            photo_url = f"/images/{frame_filename}"
-            records.append(ImageRecord(
-                photo_id=f"{file_path.stem}_frame_{frame_idx}",
-                photo_image_url=photo_url,
-                video_url=f"/images/{filename}",
-                timestamp=float(frame_idx) / float(fps),
-                description=description,
-                vector=vector,
-                caption_vector=caption_vector,
-            ))
-            
-        if records:
-            self._insert_records(records)
-            sync_to_repo()
-            
-        return {
-            "id": file_path.stem, 
-            "url": f"/images/{filename}", 
-            "description": f"Video indexed with {len(records)} frames", 
-            "status": "indexed"
-        }
 
     def process_url_upload(self, url: str, photo_id: Optional[str] = None):
         try:
@@ -213,7 +121,7 @@ class IngestionService:
 
         # Phase 3: Optionally caption (expensive — off by default for bulk)
         import numpy as np
-        zero_vec = np.zeros(EMBED_DIM, dtype="float32")
+        zero_vec = np.zeros(512, dtype="float32")
         records = []
         for i, (photo_id, url, img) in enumerate(downloaded):
             description = ""
@@ -245,16 +153,8 @@ class IngestionService:
         try:
             table = db.open_table("images")
             table.add(records)
-        except Exception:
-            table = db.create_table("images", schema=ImageRecord, data=records)
-
-        # Build/refresh BM25 full-text search index on the description field
-        # so that keyword queries (Channel 3) can find exact matches.
-        try:
-            table.create_fts_index("description", replace=True)
-        except Exception as e:
-            print(f"FTS index creation skipped: {e}")
-
+        except:
+            db.create_table("images", schema=ImageRecord, data=records)
         search_service.refresh_table()
 
     def _maybe_create_index(self, min_rows: int = 256):

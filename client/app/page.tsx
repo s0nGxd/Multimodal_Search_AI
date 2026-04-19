@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Search, Image as ImageIcon, Sparkles, Loader2, ArrowRight, Play } from "lucide-react";
+import { Search, Image as ImageIcon, Sparkles, Loader2, ArrowRight } from "lucide-react";
 import Link from "next/link";
-import { searchImages, SearchResult, getVideoFrames, VideoFrame, trackObject, TrackResult, checkBackendHealth, waitForBackend } from "@/lib/api";
+import { searchImages, SearchResult, checkBackendHealth, waitForBackend } from "@/lib/api";
 
 export default function Home() {
     const [query, setQuery] = useState("");
@@ -12,17 +12,9 @@ export default function Home() {
     const [loading, setLoading] = useState(false);
     const [hasSearched, setHasSearched] = useState(false);
     const [resultCount, setResultCount] = useState(20);
-    const [minSimilarity, setMinSimilarity] = useState(0.8);
+    const [minSimilarity, setMinSimilarity] = useState(0.2);
     const [showSettings, setShowSettings] = useState(false);
     const [focusedImage, setFocusedImage] = useState<SearchResult | null>(null);
-    const [bboxes, setBboxes] = useState<TrackResult[]>([]);
-    const videoRef = useRef<HTMLVideoElement>(null);
-    const lastDetectTime = useRef<number>(0);
-    const [isDetecting, setIsDetecting] = useState(false);
-    const [videoFrames, setVideoFrames] = useState<VideoFrame[]>([]);
-    const [currentDescription, setCurrentDescription] = useState("");
-    
-    // --- Backend Readiness State ---
     const [backendReady, setBackendReady] = useState<boolean | null>(null);
 
     useEffect(() => {
@@ -33,123 +25,31 @@ export default function Home() {
                 setBackendReady(true);
             } else {
                 setBackendReady(false);
-                waitForBackend().then(() => { if (!cancelled) setBackendReady(true); })
-                    .catch(() => { if (!cancelled) setBackendReady(false); });
+                waitForBackend().then(() => {
+                    if (!cancelled) setBackendReady(true);
+                }).catch(() => {
+                    if (!cancelled) setBackendReady(false);
+                });
             }
         });
         return () => { cancelled = true; };
     }, []);
 
-    const trackStates = useRef<Map<number, { lastBox: number[], lastTime: number }>>(new Map());
-
-    useEffect(() => {
-        if (focusedImage) {
-            setBboxes([]);
-            trackStates.current.clear();
-            setCurrentDescription(focusedImage.description || "");
-            
-            if (focusedImage.video_url) {
-                getVideoFrames(focusedImage.video_url).then(setVideoFrames).catch(console.error);
-            } else {
-                setVideoFrames([]);
-            }
-
-            // TRIGGER INITIAL SCAN: Fix for static images and background objects
-            if (query && hasSearched) {
-                lastDetectTime.current = 0;
-                // We use the original high-res URL for the initial static scan
-                trackObject(focusedImage.photo_image_url, query, focusedImage.video_url, focusedImage.video_url)
-                    .then(res => setBboxes(res.tracks || []))
-                    .catch(console.error);
-            }
-        }
-    }, [focusedImage]);
-
-    const handleTimeUpdate = async () => {
-        const video = videoRef.current;
-        if (!video || !query || !focusedImage) return;
-
-        const now = video.currentTime;
-
-        if (!isDetecting && Math.abs(now - lastDetectTime.current) >= 0.2) {
-            lastDetectTime.current = now;
-            setIsDetecting(true);
-
-            try {
-                const canvas = document.createElement("canvas");
-                const MAX_WIDTH = 480; 
-                const scale = Math.min(1.0, MAX_WIDTH / video.videoWidth);
-                canvas.width = video.videoWidth * scale;
-                canvas.height = video.videoHeight * scale;
-                
-                const ctx = canvas.getContext("2d");
-                if (ctx && canvas.width > 0) {
-                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                    const base64Image = canvas.toDataURL("image/jpeg", 0.3);
-                    
-                    const requestStartTime = now;
-                    const result = await trackObject(
-                        focusedImage.photo_image_url,
-                        query,
-                        focusedImage.video_url,
-                        focusedImage.video_url,
-                        base64Image
-                    );
-                    
-                    if (result && result.tracks) {
-                        const latency = video.currentTime - requestStartTime;
-                        
-                        const updatedTracks = result.tracks.map((t: TrackResult) => {
-                            const prev = trackStates.current.get(t.track_id);
-                            let predictedBox = [...t.bbox];
-
-                            if (prev) {
-                                const dt = now - prev.lastTime;
-                                if (dt > 0 && dt < 1.0) {
-                                    const velocity = t.bbox.map((val, i) => (val - prev.lastBox[i]) / dt);
-                                    
-                                    // DAMPED PREDICTION: We reduce the prediction weight (0.4) 
-                                    // to prevent the box from "overshooting" when objects stop suddenly.
-                                    const DAMPING = 0.4;
-                                    predictedBox = t.bbox.map((val, i) => val + (velocity[i] * latency * DAMPING));
-                                }
-                            }
-
-                            trackStates.current.set(t.track_id, { lastBox: t.bbox, lastTime: now });
-                            return { ...t, bbox: predictedBox };
-                        });
-
-                        setBboxes(updatedTracks);
-                    } else {
-                        setBboxes([]);
-                    }
-                }
-            } catch (err) {
-                console.error("Tracking update failed:", err);
-            } finally {
-                setIsDetecting(false);
-            }
-        }
-
-        if (videoFrames.length > 0) {
-            let closest = videoFrames[0];
-            for (const f of videoFrames) {
-                if (f.timestamp <= now) closest = f;
-                else break;
-            }
-            if (closest && closest.description !== currentDescription) {
-                setCurrentDescription(closest.description);
-            }
-        }
-    };
-
     const handleSearch = async (e?: React.FormEvent) => {
         if (e) e.preventDefault();
         if (!query.trim()) return;
+
         setLoading(true);
         try {
-            // FIXED: Slider value now matches image preview percentage 1-to-1
-            const data = await searchImages(query, resultCount, minSimilarity);
+            // Hybrid search produces similarities from ~0.40 (weak) to 1.0 (exact caption).
+            // The slider's "Min Similarity %" maps to this range:
+            //   slider 0% → floor 0.40 → distance 0.60 (show everything)
+            //   slider 100% → ceil 1.0 → distance 0.0 (only exact matches)
+            const CLIP_FLOOR = 0.40;
+            const CLIP_CEIL = 1.00;
+            const rawSim = CLIP_FLOOR + minSimilarity * (CLIP_CEIL - CLIP_FLOOR);
+            const distanceThreshold = 1 - rawSim;
+            const data = await searchImages(query, resultCount, distanceThreshold);
             setResults(data);
             setHasSearched(true);
         } catch (error) {
@@ -161,11 +61,13 @@ export default function Home() {
 
     return (
         <main className="min-h-screen bg-black text-white selection:bg-purple-500/30">
+            {/* Background Decor */}
             <div className="fixed inset-0 overflow-hidden pointer-events-none -z-10">
                 <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-purple-900/10 rounded-full blur-[120px]" />
                 <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-900/10 rounded-full blur-[120px]" />
             </div>
 
+            {/* Admin Link */}
             <div className="absolute top-6 right-6">
                 <Link
                     href="/admin"
@@ -177,61 +79,47 @@ export default function Home() {
             </div>
 
             <div className={`transition-all duration-700 ease-in-out ${hasSearched ? 'pt-12' : 'pt-[25vh]'}`}>
+                {/* Hero Section */}
                 <div className="max-w-4xl mx-auto px-6 text-center">
                     <motion.div
                         initial={{ opacity: 0, y: 20 }}
                         animate={{ opacity: 1, y: 0 }}
                         className="mb-8"
                     >
-                        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-400 text-xs font-medium mb-6">
-                            <Sparkles className="w-3 h-3" />
-                            Next-Gen Semantic Vision
-                        </div>
-
-                        <div className="mb-6 flex justify-center">
-                            {backendReady === null && (
-                                <motion.div
-                                    initial={{ opacity: 0, y: -10 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-gray-500/10 border border-gray-500/20 text-gray-400 text-xs font-medium"
-                                >
-                                    <Loader2 className="w-3 h-3 animate-spin" />
-                                    Checking engine status...
-                                </motion.div>
-                            )}
-                            {backendReady === false && (
-                                <motion.div
-                                    initial={{ opacity: 0, y: -10 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 text-xs font-medium"
-                                >
-                                    <Loader2 className="w-3 h-3 animate-spin" />
-                                    Waking up search engine — this takes about 30 seconds...
-                                </motion.div>
-                            )}
-                            {backendReady === true && (
-                                <motion.div
-                                    initial={{ opacity: 0, y: -10 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-green-500/10 border border-green-500/20 text-green-400 text-xs font-medium"
-                                >
-                                    <span className="w-2 h-2 rounded-full bg-green-400" />
-                                    Search engine ready
-                                </motion.div>
-                            )}
-                        </div>
-
+                        {backendReady === false ? (
+                            <motion.div
+                                initial={{ opacity: 0, y: -10 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                className="mb-6 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 text-xs font-medium"
+                            >
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                Waking up search engine — this takes about 30 seconds...
+                            </motion.div>
+                        ) : (
+                            <motion.div
+                                initial={{ opacity: 0, y: -10 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                className="mb-6 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-green-500/10 border border-green-500/20 text-green-400 text-xs font-medium"
+                            >
+                                <span className="w-2 h-2 rounded-full bg-green-400" />
+                                Search engine ready
+                            </motion.div>
+                        )}
                         <h1 className="text-5xl md:text-7xl font-bold tracking-tight mb-4 pb-2 bg-clip-text text-transparent bg-gradient-to-b from-white to-gray-500 leading-tight">
                             Find anything <br /> in your images.
                         </h1>
                         <p className="text-gray-400 text-lg max-w-xl mx-auto">
-                            Natural language search powered by SigLIP & LanceDB.
+                            Natural language search powered by CLIP & LanceDB.
                             Search by concepts, emotions, or objects.
                         </p>
                     </motion.div>
 
+                    {/* Search Bar */}
                     <div className="relative max-w-2xl mx-auto group">
-                        <form onSubmit={handleSearch} className="relative z-10">
+                        <form
+                            onSubmit={handleSearch}
+                            className="relative z-10"
+                        >
                             <div className="absolute inset-0 bg-gradient-to-r from-purple-600/20 to-blue-600/20 rounded-2xl blur-xl opacity-0 group-focus-within:opacity-100 transition-opacity" />
                             <div className="relative flex items-center bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl transition-all">
                                 <Search className="ml-4 w-5 h-5 text-gray-500" />
@@ -244,7 +132,7 @@ export default function Home() {
                                 />
                                 <button
                                     type="submit"
-                                    disabled={loading || !backendReady}
+                                    disabled={loading}
                                     className="mr-2 px-6 py-2.5 bg-white text-black font-bold rounded-xl hover:bg-gray-200 transition-all active:scale-95 disabled:opacity-50"
                                 >
                                     {loading ? <Loader2 className="animate-spin w-5 h-5" /> : "Search"}
@@ -252,6 +140,7 @@ export default function Home() {
                             </div>
                         </form>
 
+                        {/* Settings Toggle */}
                         <div className="mt-4 flex justify-center">
                             <button
                                 onClick={() => setShowSettings(!showSettings)}
@@ -262,6 +151,7 @@ export default function Home() {
                             </button>
                         </div>
 
+                        {/* Settings Panel */}
                         <AnimatePresence>
                             {showSettings && (
                                 <motion.div
@@ -271,6 +161,8 @@ export default function Home() {
                                     className="overflow-hidden"
                                 >
                                     <div className="bg-white/5 border border-white/5 rounded-xl p-4 mt-2 grid grid-cols-2 gap-6 text-left">
+
+                                        {/* Result Count Control */}
                                         <div>
                                             <label className="block text-xs text-gray-400 mb-2 font-medium">
                                                 Max Results: <span className="text-white">{resultCount}</span>
@@ -288,6 +180,8 @@ export default function Home() {
                                                 <span>50</span>
                                             </div>
                                         </div>
+
+                                        {/* Similarity Threshold Control */}
                                         <div>
                                             <label className="block text-xs text-gray-400 mb-2 font-medium">
                                                 Min Similarity: <span className="text-white">{Math.round(minSimilarity * 100)}%</span>
@@ -306,6 +200,7 @@ export default function Home() {
                                                 <span>Strict</span>
                                             </div>
                                         </div>
+
                                     </div>
                                 </motion.div>
                             )}
@@ -313,6 +208,7 @@ export default function Home() {
                     </div>
                 </div>
 
+                {/* Results Grid */}
                 <div className="max-w-7xl mx-auto px-6 mt-20 pb-20">
                     <div className="columns-1 sm:columns-2 md:columns-3 lg:columns-4 gap-6 space-y-6">
                         <AnimatePresence>
@@ -331,18 +227,11 @@ export default function Home() {
                                         alt={img.photo_id}
                                         className="w-full h-auto object-cover transform transition-transform duration-500 group-hover:scale-110"
                                     />
-                                    {img.video_url && (
-                                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-                                            <div className="w-12 h-12 bg-black/50 rounded-full flex items-center justify-center backdrop-blur-md border border-white/10 shadow-xl">
-                                                <Play className="w-5 h-5 text-white ml-1 fill-white" />
-                                            </div>
-                                        </div>
-                                    )}
                                     <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
                                         <div className="flex justify-between items-center mb-1.5">
                                             <p className="text-[10px] text-gray-400 font-mono truncate">{img.photo_id}</p>
-                                            {img.score && (
-                                                <span className="text-[10px] bg-purple-500/30 border border-purple-500/30 px-1.5 py-0.5 rounded text-purple-300 font-medium">
+                                            {img.score !== undefined && (
+                                                <span className="text-[10px] bg-purple-500/30 border border-purple-500/30 px-1.5 py-0.5 rounded text-purple-300 font-medium whitespace-nowrap">
                                                     {Math.round(img.score * 100)}% Match
                                                 </span>
                                             )}
@@ -357,9 +246,17 @@ export default function Home() {
                             ))}
                         </AnimatePresence>
                     </div>
+
+                    {!loading && hasSearched && results.length === 0 && (
+                        <div className="text-center py-20">
+                            <ImageIcon className="w-12 h-12 text-gray-700 mx-auto mb-4" />
+                            <h3 className="text-xl font-medium text-gray-500">No matches found</h3>
+                            <p className="text-gray-600">Try adjusting your search or broadening the description.</p>
+                        </div>
+                    )}
                 </div>
             </div>
-
+            {/* Image Lightbox */}
             <AnimatePresence>
                 {focusedImage && (
                     <motion.div
@@ -377,58 +274,23 @@ export default function Home() {
                             className="relative max-w-4xl max-h-[85vh] w-full flex flex-col items-center"
                             onClick={(e) => e.stopPropagation()}
                         >
-                            <div className="relative inline-flex items-center justify-center max-h-[70vh] rounded-2xl overflow-hidden shadow-2xl bg-black/50">
-                                {focusedImage.video_url ? (
-                                    <video
-                                        ref={videoRef}
-                                        src={focusedImage.video_url}
-                                        crossOrigin="anonymous"
-                                        controls
-                                        autoPlay
-                                        className="max-h-[70vh] w-auto"
-                                        onLoadedMetadata={(e) => {
-                                            if (focusedImage.timestamp) {
-                                                e.currentTarget.currentTime = focusedImage.timestamp;
-                                                lastDetectTime.current = focusedImage.timestamp;
-                                            }
-                                        }}
-                                        onTimeUpdate={handleTimeUpdate}
-                                    />
-                                ) : (
-                                    <img
-                                        src={focusedImage.photo_image_url}
-                                        alt={focusedImage.photo_id}
-                                        className="max-h-[70vh] w-auto"
-                                    />
-                                )}
-                                {bboxes.map((box) => (
-                                    <motion.div
-                                        key={box.track_id}
-                                        layout
-                                        transition={{ type: "tween", ease: "linear", duration: 0.15 }}
-                                        className="absolute border-[3px] bg-red-500/10 pointer-events-none rounded sm:border-4 transition-all"
-                                        style={{
-                                            left: `${box.bbox[0] * 100}%`,
-                                            top: `${box.bbox[1] * 100}%`,
-                                            width: `${(box.bbox[2] - box.bbox[0]) * 100}%`,
-                                            height: `${(box.bbox[3] - box.bbox[1]) * 100}%`,
-                                            boxShadow: "0 0 15px rgba(239, 68, 68, 0.5)",
-                                            borderColor: `hsl(${(box.track_id * 60) % 360}, 80%, 55%)`
-                                        }}
-                                    >
-                                        <span 
-                                            className="absolute -top-6 left-0 text-[10px] font-bold px-1 rounded"
-                                            style={{ color: `hsl(${(box.track_id * 60) % 360}, 80%, 55%)`, backgroundColor: "rgba(0,0,0,0.7)" }}
-                                        >
-                                            #{box.track_id}
+                            <img
+                                src={focusedImage.photo_image_url}
+                                alt={focusedImage.photo_id}
+                                className="max-h-[70vh] w-auto rounded-2xl object-contain shadow-2xl"
+                            />
+                            <div className="mt-4 w-full max-w-2xl text-center space-y-2">
+                                <div className="flex items-center justify-center gap-3">
+                                    <p className="text-xs text-gray-500 font-mono">{focusedImage.photo_id}</p>
+                                    {focusedImage.score !== undefined && (
+                                        <span className="text-xs bg-purple-500/30 border border-purple-500/30 px-2 py-0.5 rounded text-purple-300 font-medium">
+                                            {Math.round(focusedImage.score * 100)}% Match
                                         </span>
-                                    </motion.div>
-                                ))}
-                            </div>
-                            <div className="mt-4 w-full max-w-2xl text-center space-y-2 px-4">
-                                {currentDescription && (
+                                    )}
+                                </div>
+                                {focusedImage.description && (
                                     <p className="text-sm text-white/90 bg-white/5 border border-white/10 rounded-xl px-4 py-3 italic">
-                                        "{currentDescription}"
+                                        "{focusedImage.description}"
                                     </p>
                                 )}
                             </div>

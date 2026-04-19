@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
@@ -34,14 +34,8 @@ app.add_middleware(
 data_dir = os.getenv("DATA_DIR", "data")
 os.makedirs(data_dir, exist_ok=True)
 
-class CORSStaticFiles(StaticFiles):
-    async def get_response(self, path: str, scope):
-        response = await super().get_response(path, scope)
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        return response
-
-# Mount static files (uploaded images) with CORS injection
-app.mount("/images", CORSStaticFiles(directory=data_dir), name="images")
+# Mount static files (uploaded images)
+app.mount("/images", StaticFiles(directory=data_dir), name="images")
 
 from app.routers import search, upload
 
@@ -53,39 +47,10 @@ def root():
     return {"message": "SEGP Semantic Search API", "docs": "/docs", "health": "/health"}
 
 @app.get("/health")
-async def health_check():
+def health_check():
     return {"status": "ok", "service": "semantic-search-api"}
 
-@app.delete("/api/images/{photo_id}")
-async def delete_image(photo_id: str):
-    try:
-        from app.services.search_service import search_service
-        if search_service.table is not None:
-            # First, check if this is part of a video
-            df = search_service.table.to_pandas()
-            target = df[df["photo_id"] == photo_id]
-            
-            if target.empty:
-                return {"status": "not_found", "photo_id": photo_id}
-            
-            video_url = target.iloc[0].get("video_url", "")
-            
-            if video_url and isinstance(video_url, str) and video_url.strip():
-                # Delete all frames associated with this video
-                search_service.table.delete(f"video_url = '{video_url}'")
-                return {"status": "deleted_video", "video_url": video_url}
-            else:
-                # Regular image delete
-                search_service.table.delete(f"photo_id = '{photo_id}'")
-                return {"status": "deleted", "photo_id": photo_id}
-        else:
-            raise HTTPException(status_code=500, detail="Database table not initialized")
-    except Exception as e:
-        print(f"Delete error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 if __name__ == "__main__":
-
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)

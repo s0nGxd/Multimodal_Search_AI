@@ -1,142 +1,127 @@
-# Multimodal Search Engine
+# SEGP Semantic Search Engine
 
-An intelligent multimodal image search engine powered by **SigLIP** (vision-language model), **LanceDB** (vector store), and **BM25** keyword search — fused with Reciprocal Rank Fusion (RRF) for best-in-class retrieval accuracy.
+A multimodal semantic image search engine that lets users find images using natural language. Built for **WyseTime Technologies** as part of the Software Engineering Group Project (SEGP).
 
----
-
-## Prerequisites
-
-Install these once on your machine:
-
-- **Python 3.10+** — https://python.org
-- **Node.js LTS** — https://nodejs.org
+**Live Demo:** [https://client-nine-xi-31.vercel.app](https://client-nine-xi-31.vercel.app)
 
 ---
 
-## Setup (First Time Only)
+## What It Does
 
-### Backend
+Type a description — "elderly man wearing glasses", "red trolley on a city street", "mountain landscape" — and the system returns matching images ranked by semantic similarity.
 
-**Windows (PowerShell)**
-```powershell
-cd server
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+### Key Capabilities
 
-# OPTION A: Standard (CPU Only)
-pip install -r requirements.txt
-
-# OPTION B: GPU Accelerated (Recommended for Nvidia users)
-# Run this AFTER Option A to upgrade to the CUDA-enabled engine:
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-```
-
-**Mac / Linux**
-```bash
-cd server
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### Frontend
-
-```bash
-cd client
-npm install
-```
-
----
-
-## Running the App
-
-You need **two terminals** open simultaneously.
-
-### Terminal 1 — Backend
-
-**Windows**
-```powershell
-cd server
-.venv\Scripts\Activate.ps1
-uvicorn app.main:app --reload --port 8000
-```
-
-**Mac / Linux**
-```bash
-cd server
-source .venv/bin/activate
-uvicorn app.main:app --reload --port 8000
-```
-
-**Mac / Linux**
-```bash
-cd server
-source .venv/bin/activate
-python -m app.main
-```
-
-> ⏳ First run downloads the SigLIP model (~600 MB). Subsequent runs are fast.
-
-Backend runs at: **http://localhost:8000**
-
-### Terminal 2 — Frontend
-
-```bash
-cd client
-npm run dev
-```
-
-Frontend runs at: **http://localhost:3000**
-
----
-
-## Using the App
-
-| URL | Purpose |
-|---|---|
-| http://localhost:3000 | Search images by text |
-| http://localhost:3000/admin | Upload & index images (password: `admin`) |
-| http://localhost:8000/docs | API documentation (Swagger UI) |
-
-**First time?** Go to `/admin`, upload some images, then search at `/`.
+- **Natural Language Search** — Search by concepts, not filenames. Powered by OpenAI's CLIP model.
+- **Auto-Captioning** — Every uploaded image is automatically described using BLIP, enabling text-to-text matching alongside visual matching.
+- **Hybrid Search** — Queries are matched against both the image embedding and the caption embedding. The best match wins.
+- **Online Ingestion** — Upload images via the admin panel (file upload, URL, or bulk CSV import). Images become searchable immediately.
+- **Persistent Storage** — Data survives server restarts via automatic sync to Hugging Face Hub.
 
 ---
 
 ## Architecture
 
 ```
-client/          → Next.js frontend (search UI + admin upload panel)
-server/
-  app/
-    main.py                        → FastAPI entry point
-    routers/
-      search.py                    → Search API endpoint
-      upload.py                    → Image upload/ingestion endpoint
-    services/
-      search_service.py            → SigLIP embeddings + 3-channel RRF hybrid search
-      ingestion_service.py         → Image download, captioning, embedding, LanceDB insert
-      caption_service.py           → BLIP image captioning
-      persistence_service.py       → HuggingFace dataset sync (for cloud deployment)
-  .env                             → Model configuration (EMBED_MODEL, EMBED_DIM)
-  requirements.txt                 → Python dependencies
+Next.js (Vercel)  →  FastAPI (HF Spaces)  →  LanceDB + HF Hub
+   Frontend             Backend API           Vector DB / Persistence
 ```
 
-## Search Strategy
-
-Each search query runs three channels in parallel and fuses them with **Reciprocal Rank Fusion**:
-
-1. **Image vector** — SigLIP visual similarity
-2. **Caption vector** — SigLIP semantic text match against BLIP-generated captions
-3. **BM25 keyword** — exact keyword match on image descriptions
-
-The `% Match` score shown in the UI reflects how highly an image ranked across **all three channels combined** — not just geometric distance.
+| Component | Technology | Hosting |
+|---|---|---|
+| Frontend | Next.js 16, React 19, Tailwind CSS | Vercel |
+| Backend API | FastAPI, Python 3.11 | Hugging Face Spaces (Docker) |
+| Embedding Model | CLIP ViT-B/32 (512-dim vectors) | Loaded at runtime |
+| Captioning Model | BLIP (Salesforce) | Loaded at runtime |
+| Vector Database | LanceDB (open source) | Local + HF Hub sync |
 
 ---
 
-## Performance & Security
+## How It Works
 
-### 🚀 GPU Acceleration
-The application automatically detects Nvidia GPUs (`cuda`) and uses them as the primary compute engine. Transitioning from CPU to GPU typically results in a **10x-20x speedup** for both search and video indexing.
+### Search Flow
+1. User enters a text query
+2. CLIP encodes the query into a 512-dimensional vector
+3. LanceDB searches against both image vectors and caption vectors
+4. Results are ranked by cosine similarity and returned with match scores
 
-### 🛡️ Safetensors (CVE-2025-32434)
-This engine utilizes the **Safetensors** weight format for all models (SigLIP, BLIP, OWL-ViT). This protects the application from the well-known "Pickle vulnerability" (CVE-2025-32434) by ensuring that model weights are loaded in a restricted, non-executable memory space.
+### Ingestion Flow
+1. Image is uploaded via the admin panel
+2. CLIP generates an image embedding (512-dim vector)
+3. BLIP generates a text caption
+4. CLIP embeds the caption into a second vector
+5. Both vectors + metadata are stored in LanceDB
+6. Data is synced to Hugging Face Hub for persistence
+
+---
+
+## Using the System
+
+### Search (Public)
+1. Open [https://client-nine-xi-31.vercel.app](https://client-nine-xi-31.vercel.app)
+2. Wait for the green "Search engine ready" indicator
+3. Type a description and click Search
+4. Click any image to view it in full size with its caption
+
+### Admin Panel
+1. Navigate to [/admin](https://client-nine-xi-31.vercel.app/admin)
+2. Password: `admin`
+3. Available actions:
+   - **File Upload** — Upload a single image from your device
+   - **Remote URL** — Index an image from any public URL
+   - **Bulk Ingest** — Import images from the reference dataset
+   - **All Images** — View every indexed image in the database
+
+---
+
+## Performance
+
+| Metric | Value |
+|---|---|
+| Search response time (warm) | ~1.1s |
+| Single image ingestion | ~13s |
+| Bulk ingestion throughput | ~24 images/min |
+| Cold start (after sleep) | ~79s |
+
+### Search Accuracy (15 test queries, 30 images)
+
+| Metric | Score |
+|---|---|
+| Precision@1 | 73.3% |
+| Precision@3 | 80.0% |
+| Precision@10 | 86.7% |
+| Mean Reciprocal Rank | 0.84 |
+
+Full evaluation details in [`DOCUMENTATION/evaluation-metrics.md`](DOCUMENTATION/evaluation-metrics.md).
+
+---
+
+## Project Structure
+
+```
+├── README.md                  ← You are here
+├── SETUP.md                   ← Developer setup guide
+├── DOCUMENTATION/
+│   ├── evaluation-metrics.md  ← Search accuracy benchmarks
+│   ├── architecture_diagrams.md
+│   └── screenshots/
+├── client/                    ← Next.js frontend
+│   ├── app/                   ← Pages (search, admin)
+│   ├── lib/api.ts             ← API client
+│   └── .env.production        ← Production API URL
+└── server/                    ← FastAPI backend
+    ├── app/
+    │   ├── main.py            ← FastAPI app entry point
+    │   ├── routers/           ← API endpoints
+    │   └── services/          ← CLIP, BLIP, LanceDB, persistence
+    ├── requirements.txt
+    └── Dockerfile
+```
+
+---
+
+## Team
+
+Built by **Group 20** — University of Nottingham Malaysia, Software Engineering Group Project (Autumn 2025).
+
+Client: **WyseTime Technologies Sdn. Bhd.** — AI computer vision solutions for security and surveillance.

@@ -28,14 +28,18 @@ def process_url_upload(self, url: str, photo_id: Optional[str] = None):
     response.raise_for_status()
     img = Image.open(io.BytesIO(response.content)).convert("RGB")
 
-    # Generate CLIP Embedding in memory
+    # Generate CLIP image embedding, BLIP caption, and CLIP caption embedding
     vector = search_service.embed_image(img)
-    
-    # Store in LanceDB
+    description = caption_service.generate_caption(img)
+    caption_vector = search_service.embed_text(description)
+
+    # Store in LanceDB (two vectors + caption per image for hybrid search)
     record = ImageRecord(
         photo_id=photo_id or f"remote_{hash(url)}",
         photo_image_url=url,
-        vector=vector
+        description=description,
+        vector=vector,
+        caption_vector=caption_vector,
     )
     self._insert_records([record])
 ```
@@ -61,18 +65,37 @@ We modified the search algorithm to return the `_distance` metric from LanceDB a
 ```python
 # server/app/services/search_service.py
 
-def search(self, query: str, k: int = 20, threshold: float = 0.5):
+def search(self, query: str, k: int = 20, threshold: float = 0.9):
     query_vec = self.embed_text(query)
-    
-    # Retrieval with Distance metric
-    results = self.table.search(query_vec).metric("cosine").limit(k).to_pandas()
-    
-    if results.empty: return []
-        
-    # Guardrail: Only keep high-confidence matches
-    # Cosine distance 0.0 = Perfect match, 2.0 = Opposite
-    results = results[results["_distance"] <= threshold]
-    return results.to_dict(orient="records")
+
+    # Search 1: query vs image vectors (visual similarity / cross-modal)
+    image_results = (
+        self.table.search(query_vec, vector_column_name="vector")
+        .metric("cosine").limit(k).select(["photo_id", "photo_image_url", "description", "_distance"])
+        .to_pandas()
+    )
+
+    # Search 2: query vs caption vectors (text similarity / same-modal)
+    caption_results = (
+        self.table.search(query_vec, vector_column_name="caption_vector")
+        .metric("cosine").limit(k).select(["photo_id", "photo_image_url", "description", "_distance"])
+        .to_pandas()
+    )
+
+    # Merge: for each image keep whichever search gave the lower distance (better match)
+    best = {}
+    for df in [image_results, caption_results]:
+        for _, row in df.iterrows():
+            pid = row["photo_id"]
+            dist = row.get("_distance", 1.0)
+            if pid not in best or dist < best[pid]["_distance"]:
+                best[pid] = row.to_dict()
+
+    # Guardrail: Only keep high-confidence matches, sorted by distance
+    # Cosine distance 0.0 = Perfect match. Threshold 0.9 keeps all meaningful results.
+    results = sorted(best.values(), key=lambda r: r["_distance"])
+    results = [r for r in results if r["_distance"] <= threshold]
+    return results[:k]
 ```
 
 #### Code Snippet: Frontend UI Enhancement
@@ -139,11 +162,11 @@ const [activeTab, setActiveTab] = useState<"file" | "url" | "bulk">("file");
 ```typescript
 // client/lib/api.ts
 
-export async function searchImages(query: string, k: number = 20, threshold: number = 0.85) {
+export async function searchImages(query: string, k: number = 20, threshold: number = 0.9) {
     const res = await fetch(`${API_BASE}/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, k, threshold }), // Defaults to 0.85 for ultra-high precision
+        body: JSON.stringify({ query, k, threshold }),
     });
     // ... handling
 }
@@ -275,12 +298,17 @@ If the current system is hosted entirely on a serverless platform like Vercel, i
 1.  **Ephemeral Filesystem**: Serverless functions spin up for seconds and then destroy themselves. Any data saved to the local `lancedb_db` or `server/data` folder during that time is actively deleted when the function spins down.
 2.  **Timeout Limits**: Initializing heavy AI models (CLIP + BLIP) often exceeds the standard 10-second timeout of serverless functions.
 
-### The Solution (Proposed): Split-Stack Architecture
-To ensure data persists and models run reliably, we must split the hosting strategy:
+### The Solution (Implemented): Split-Stack Architecture with HF Hub Persistence
 
-1.  **Frontend (Next.js)** -> **Vercel**: Excellent for static content and edge caching.
-2.  **Backend (FastAPI)** -> **Railway / Render**: Services that provide **Persistent Disk** (state) and long-running processes.
-3.  **Object Storage** -> **S3 / Cloudinary**: Decoupling image storage from the execution environment.
+We split the hosting strategy to match the requirements of each layer:
+
+1.  **Frontend (Next.js)** → **Vercel**: Excellent for static content and edge caching. Zero config for Next.js.
+2.  **Backend (FastAPI + CLIP + BLIP + LanceDB)** → **Hugging Face Spaces (Docker)**: Free tier with 2 vCPU / 16GB RAM, purpose-built for ML workloads. Eliminates the timeout problem — containers run persistently, not as serverless functions.
+3.  **Data Persistence** → **Hugging Face Hub Dataset Repo**: After each ingestion, `persistence_service.py` uploads the LanceDB index and images directory to a private HF Dataset repo via `huggingface_hub`. On container restart, `restore_from_repo()` pulls everything back down before the first request is served.
+
+Railway/Render and S3/Cloudinary were evaluated but not chosen. HF Spaces was preferred because it is free, natively supports PyTorch/Transformers workloads, and keeps the entire stack within the Hugging Face ecosystem (same token, same CLI, same mental model as model downloads).
+
+Full deployment details — including CORS configuration, Docker optimisation, environment variables, and the ghost-localhost bug — are documented in **Section 9**.
 
 ### Implications
 | Category | Implication of NOT Solving |

@@ -2,18 +2,16 @@
 
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Upload, CheckCircle, AlertCircle, Loader2, Database, ArrowLeft, Image as ImageIcon, X, FileImage, Play, Trash2 } from "lucide-react";
+import { Upload, CheckCircle, AlertCircle, Loader2, Database, ArrowLeft, Image as ImageIcon } from "lucide-react";
 import Link from "next/link";
-import { uploadImage, bulkIngest, ingestViaUrl, listAllImages, SearchResult, getVideoFrames, VideoFrame, deleteImage } from "@/lib/api";
+import { uploadImage, bulkIngest, ingestViaUrl, listAllImages, SearchResult, checkBackendHealth } from "@/lib/api";
 
 export default function AdminPage() {
     const [isAuthenticated, setIsAuthenticated] = useState(false);
     const [password, setPassword] = useState("");
 
-    type FileQueueItem = { file: File; status: "pending" | "uploading" | "done" | "error"; message: string };
-    const [fileQueue, setFileQueue] = useState<FileQueueItem[]>([]);
-    const [isDragging, setIsDragging] = useState(false);
-    const [isUploading, setIsUploading] = useState(false);
+    const [file, setFile] = useState<File | null>(null);
+    const [uploading, setUploading] = useState(false);
     const [status, setStatus] = useState<"idle" | "success" | "error">("idle");
     const [message, setMessage] = useState("");
     const [isBulkIndexing, setIsBulkIndexing] = useState(false);
@@ -23,19 +21,11 @@ export default function AdminPage() {
     const [allImages, setAllImages] = useState<SearchResult[]>([]);
     const [loadingImages, setLoadingImages] = useState(false);
     const [focusedImage, setFocusedImage] = useState<SearchResult | null>(null);
-    const [videoFrames, setVideoFrames] = useState<VideoFrame[]>([]);
-    const [currentDescription, setCurrentDescription] = useState("");
+    const [backendStatus, setBackendStatus] = useState<"checking" | "ok" | "down">("checking");
 
     useEffect(() => {
-        if (focusedImage) {
-            setCurrentDescription(focusedImage.description || "");
-            if (focusedImage.video_url) {
-                getVideoFrames(focusedImage.video_url).then(setVideoFrames).catch(console.error);
-            } else {
-                setVideoFrames([]);
-            }
-        }
-    }, [focusedImage]);
+        checkBackendHealth().then(ok => setBackendStatus(ok ? "ok" : "down"));
+    }, []);
 
     const fetchAllImages = async () => {
         setLoadingImages(true);
@@ -50,12 +40,6 @@ export default function AdminPage() {
         }
     };
 
-    useEffect(() => {
-        if (activeTab === "gallery") {
-            fetchAllImages();
-        }
-    }, [activeTab]);
-
     const handleLogin = (e: React.FormEvent) => {
         e.preventDefault();
         if (password === "admin") {
@@ -65,88 +49,27 @@ export default function AdminPage() {
         }
     };
 
-    const handleDelete = async (photo_id: string, e?: React.MouseEvent) => {
-        if (e) e.stopPropagation();
-        if (!confirm("Are you sure you want to delete this record?")) return;
-        
-        try {
-            await deleteImage(photo_id);
-            setAllImages(prev => prev.filter(img => img.photo_id !== photo_id));
-            if (focusedImage?.photo_id === photo_id) setFocusedImage(null);
-            setStatus("success");
-            setMessage("Record deleted successfully");
-        } catch (e: any) {
-            alert("Delete failed: " + e.message);
-        }
-    };
-
-    const addFilesToQueue = (newFiles: File[]) => {
-        const mediaFiles = newFiles.filter(f => f.type.startsWith("image/") || f.type.startsWith("video/"));
-        setFileQueue(prev => [
-            ...prev,
-            ...mediaFiles.map(f => ({ file: f, status: "pending" as const, message: "" }))
-        ]);
-    };
-
-    const removeFromQueue = (index: number) => {
-        setFileQueue(prev => prev.filter((_, i) => i !== index));
-    };
-
-    const clearQueue = () => setFileQueue([]);
-
-    const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); setIsDragging(true); };
-    const handleDragLeave = (e: React.DragEvent) => { e.preventDefault(); setIsDragging(false); };
-    const handleDrop = (e: React.DragEvent) => {
-        e.preventDefault();
-        setIsDragging(false);
-        const dropped = Array.from(e.dataTransfer.files);
-        addFilesToQueue(dropped);
-    };
-
-    const handleBatchUpload = async () => {
-        const pending = fileQueue.filter(item => item.status === "pending");
-        if (pending.length === 0) return;
-        setIsUploading(true);
+    const handleUpload = async () => {
+        if (!file) return;
+        setUploading(true);
         setStatus("idle");
-
-        let successCount = 0;
-        let errorCount = 0;
-
-        for (let i = 0; i < fileQueue.length; i++) {
-            if (fileQueue[i].status !== "pending") continue;
-
-            setFileQueue(prev => prev.map((item, idx) =>
-                idx === i ? { ...item, status: "uploading" } : item
-            ));
-
-            try {
-                const result = await uploadImage(fileQueue[i].file);
-                setFileQueue(prev => prev.map((item, idx) =>
-                    idx === i ? { ...item, status: "done", message: result.description || "Indexed" } : item
-                ));
-                successCount++;
-            } catch (e: any) {
-                setFileQueue(prev => prev.map((item, idx) =>
-                    idx === i ? { ...item, status: "error", message: e.message || "Failed" } : item
-                ));
-                errorCount++;
-            }
-        }
-
-        setIsUploading(false);
-        if (errorCount === 0) {
+        try {
+            const result = await uploadImage(file);
             setStatus("success");
-            setMessage(`Successfully indexed ${successCount} file${successCount !== 1 ? "s" : ""}.`);
-        } else {
+            setMessage(`Indexed: ${file.name}. Description: ${result.description}`);
+            setFile(null);
+        } catch (e: any) {
             setStatus("error");
-            setMessage(`${successCount} indexed, ${errorCount} failed. Check the queue for details.`);
+            setMessage(e.message || "Upload failed");
+        } finally {
+            setUploading(false);
         }
     };
 
     const handleUrlIngest = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!imageUrl) return;
-        setIsUploading(true);
+        setUploading(true);
         setStatus("idle");
         try {
             const result = await ingestViaUrl(imageUrl);
@@ -157,7 +80,7 @@ export default function AdminPage() {
             setStatus("error");
             setMessage(e.message || "URL ingestion failed");
         } finally {
-            setIsUploading(false);
+            setUploading(false);
         }
     };
 
@@ -165,7 +88,7 @@ export default function AdminPage() {
         setIsBulkIndexing(true);
         setStatus("idle");
         try {
-            const result = await bulkIngest(10); 
+            const result = await bulkIngest(10); // Batch of 10 for speed
             setStatus("success");
             setMessage(`Bulk ingestion complete: Processed ${result.processed} images.`);
         } catch (e: any) {
@@ -222,12 +145,18 @@ export default function AdminPage() {
                         <p className="text-gray-500 mt-2">Manage your semantic indexed dataset</p>
                     </div>
                     <div className="px-4 py-2 rounded-full bg-white/5 border border-white/10 text-xs font-mono text-gray-400">
-                        STATUS: <span className="text-green-400">OPERATIONAL</span>
+                        STATUS:{" "}
+                        {backendStatus === "checking" && <span className="text-yellow-400">CHECKING...</span>}
+                        {backendStatus === "ok" && <span className="text-green-400">OPERATIONAL</span>}
+                        {backendStatus === "down" && <span className="text-red-400">UNREACHABLE</span>}
                     </div>
                 </header>
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    {/* Main Actions Area */}
                     <div className="lg:col-span-2 space-y-8">
+
+                        {/* Tabs */}
                         <div className="flex p-1 bg-white/5 border border-white/5 rounded-2xl w-fit">
                             {[
                                 { id: "file", label: "File Upload", icon: Upload },
@@ -251,101 +180,50 @@ export default function AdminPage() {
 
                         <div className="p-8 rounded-3xl bg-white/5 border border-white/10 backdrop-blur-md">
                             {activeTab === "file" && (
-                                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-5">
-                                    <div className="flex items-center justify-between">
-                                        <h3 className="text-lg font-medium">Upload Local Assets</h3>
-                                        {fileQueue.length > 0 && (
-                                            <button onClick={clearQueue} disabled={isUploading} className="text-xs text-gray-500 hover:text-red-400 transition-colors disabled:opacity-40">
-                                                Clear all
-                                            </button>
-                                        )}
-                                    </div>
-
+                                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+                                    <h3 className="text-lg font-medium mb-6">Upload Local Assets</h3>
                                     <div
-                                        onDragOver={handleDragOver}
-                                        onDragLeave={handleDragLeave}
-                                        onDrop={handleDrop}
-                                        className={`relative border-2 border-dashed rounded-2xl p-12 text-center transition-all ${isDragging
-                                            ? "border-purple-400 bg-purple-500/10 scale-[1.01]"
-                                            : "border-white/10 hover:border-white/20 hover:bg-white/[0.02]"
+                                        className={`group border-2 border-dashed rounded-2xl p-16 text-center cursor-pointer transition-all ${file ? "border-purple-500 bg-purple-500/5" : "border-white/10 hover:border-white/20 hover:bg-white/[0.02]"
                                             }`}
                                     >
                                         <input
                                             type="file"
-                                            accept="image/*,video/*"
-                                            multiple
+                                            accept="image/*"
                                             className="hidden"
                                             id="file-upload"
                                             onChange={(e) => {
-                                                if (e.target.files && e.target.files.length > 0) {
-                                                    addFilesToQueue(Array.from(e.target.files));
-                                                    e.target.value = "";
+                                                if (e.target.files?.[0]) {
+                                                    setFile(e.target.files[0]);
+                                                    setStatus("idle");
                                                 }
                                             }}
                                         />
-                                        <label htmlFor="file-upload" className="cursor-pointer block">
-                                            <div className="flex flex-col items-center gap-3 pointer-events-none">
-                                                <div className={`p-4 rounded-full transition-colors ${isDragging ? "bg-purple-500/20 text-purple-400" : "bg-white/5 text-gray-400"
-                                                    }`}>
-                                                    <Upload className="w-8 h-8" />
+                                        <label htmlFor="file-upload" className="w-full h-full block cursor-pointer">
+                                            {file ? (
+                                                <div className="flex flex-col items-center gap-3">
+                                                    <div className="p-4 bg-purple-500/20 rounded-full text-purple-400">
+                                                        <Upload className="w-8 h-8" />
+                                                    </div>
+                                                    <span className="text-purple-300 font-medium">{file.name}</span>
+                                                    <span className="text-gray-500 text-xs">{(file.size / 1024).toFixed(1)} KB</span>
                                                 </div>
-                                                <div>
-                                                    <span className="text-gray-300">
-                                                        {isDragging ? "Release to add files" : (<>Drag &amp; drop images or videos, or <span className="text-purple-400 underline">browse</span></>)}
-                                                    </span>
-                                                    <p className="text-gray-600 text-xs mt-1">JPG, PNG, GIF, WEBP, MP4, WEBM — multiple files supported</p>
+                                            ) : (
+                                                <div className="flex flex-col items-center gap-3">
+                                                    <div className="p-4 bg-white/5 rounded-full text-gray-400 group-hover:text-gray-300 transition-colors">
+                                                        <Upload className="w-8 h-8" />
+                                                    </div>
+                                                    <span className="text-gray-400">Drop your image or <span className="text-purple-400">browse</span></span>
+                                                    <span className="text-gray-600 text-xs">JPG, PNG, GIF up to 10MB</span>
                                                 </div>
-                                            </div>
+                                            )}
                                         </label>
                                     </div>
-
-                                    {fileQueue.length > 0 && (
-                                        <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
-                                            {fileQueue.map((item, idx) => (
-                                                <div key={idx} className="flex items-center gap-3 p-3 rounded-xl bg-white/5 border border-white/5">
-                                                    {item.file.type.startsWith("video/") ? (
-                                                        <Upload className="w-4 h-4 text-gray-500 shrink-0" />
-                                                    ) : (
-                                                        <FileImage className="w-4 h-4 text-gray-500 shrink-0" />
-                                                    )}
-                                                    <div className="flex-1 min-w-0">
-                                                        <p className="text-sm text-white truncate">{item.file.name}</p>
-                                                        <p className="text-xs text-gray-500">{(item.file.size / 1024).toFixed(1)} KB</p>
-                                                    </div>
-                                                    {item.status === "pending" && (
-                                                        <span className="text-xs px-2 py-0.5 rounded-full bg-white/10 text-gray-400 shrink-0">Pending</span>
-                                                    )}
-                                                    {item.status === "uploading" && (
-                                                        <Loader2 className="w-4 h-4 animate-spin text-purple-400 shrink-0" />
-                                                    )}
-                                                    {item.status === "done" && (
-                                                        <CheckCircle className="w-4 h-4 text-green-400 shrink-0" />
-                                                    )}
-                                                    {item.status === "error" && (
-                                                        <span title={item.message}>
-                                                            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
-                                                        </span>
-                                                    )}
-                                                    {item.status === "pending" && !isUploading && (
-                                                        <button onClick={() => removeFromQueue(idx)} className="text-gray-600 hover:text-red-400 transition-colors shrink-0">
-                                                            <X className="w-4 h-4" />
-                                                        </button>
-                                                    )}
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-
                                     <button
-                                        onClick={handleBatchUpload}
-                                        disabled={fileQueue.filter(i => i.status === "pending").length === 0 || isUploading}
-                                        className="w-full py-4 bg-gradient-to-r from-purple-600 to-blue-600 rounded-xl font-semibold disabled:opacity-50 disabled:grayscale transition-all active:scale-[0.99] shadow-lg shadow-purple-500/20 flex items-center justify-center gap-2"
+                                        onClick={handleUpload}
+                                        disabled={!file || uploading}
+                                        className="w-full mt-6 py-4 bg-gradient-to-r from-purple-600 to-blue-600 rounded-xl font-semibold disabled:opacity-50 disabled:grayscale transition-all active:scale-[0.99] shadow-lg shadow-purple-500/20"
                                     >
-                                        {isUploading ? (
-                                            <><Loader2 className="animate-spin w-5 h-5" /> Indexing...</>
-                                        ) : (
-                                            `Index ${fileQueue.filter(i => i.status === "pending").length || ""} File${fileQueue.filter(i => i.status === "pending").length !== 1 ? "s" : ""}`
-                                        )}
+                                        {uploading ? <Loader2 className="animate-spin w-5 h-5 mx-auto" /> : "Index File"}
                                     </button>
                                 </motion.div>
                             )}
@@ -367,10 +245,10 @@ export default function AdminPage() {
                                         </div>
                                         <button
                                             type="submit"
-                                            disabled={!imageUrl || isUploading}
+                                            disabled={!imageUrl || uploading}
                                             className="w-full py-4 bg-gradient-to-r from-blue-600 to-cyan-600 rounded-xl font-semibold disabled:opacity-50 transition-all active:scale-[0.99]"
                                         >
-                                            {isUploading ? <Loader2 className="animate-spin w-5 h-5 mx-auto" /> : "Fetch & Index"}
+                                            {uploading ? <Loader2 className="animate-spin w-5 h-5 mx-auto" /> : "Fetch & Index"}
                                         </button>
                                     </form>
                                 </motion.div>
@@ -385,7 +263,7 @@ export default function AdminPage() {
                                     <div className="p-6 rounded-2xl bg-blue-500/5 border border-blue-500/10 flex items-start gap-4">
                                         <Database className="w-5 h-5 text-blue-400 mt-1" />
                                         <div className="text-sm leading-relaxed text-gray-400">
-                                            This process will download imagery and generate SigLIP vectors for each record. Performance depends on network speed.
+                                            This process will download imagery and generate CLIP vectors for each record. Performance depends on network speed.
                                         </div>
                                     </div>
                                     <button
@@ -432,22 +310,7 @@ export default function AdminPage() {
                                                     className="w-full h-40 object-cover"
                                                     loading="lazy"
                                                 />
-                                                {img.video_url && (
-                                                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-                                                        <div className="w-10 h-10 bg-black/50 rounded-full flex items-center justify-center backdrop-blur-md">
-                                                            <Play className="w-4 h-4 text-white ml-1" />
-                                                        </div>
-                                                    </div>
-                                                )}
-                                                
-                                                <button
-                                                    onClick={(e) => handleDelete(img.photo_id, e)}
-                                                    className="absolute top-2 right-2 p-2 bg-red-500/80 rounded-lg text-white opacity-0 group-hover:opacity-100 transition-all hover:bg-red-600 z-30 shadow-lg"
-                                                >
-                                                    <Trash2 className="w-4 h-4" />
-                                                </button>
-
-                                                <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-3 z-20">
+                                                <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-3">
                                                     <p className="text-[10px] text-gray-400 font-mono truncate">{img.photo_id}</p>
                                                     {img.description && (
                                                         <p className="text-[11px] text-white/80 line-clamp-2 mt-1 italic">"{img.description}"</p>
@@ -459,6 +322,7 @@ export default function AdminPage() {
                                 </motion.div>
                             )}
 
+                            {/* Status Feed */}
                             <AnimatePresence>
                                 {status !== "idle" && (
                                     <motion.div
@@ -476,13 +340,14 @@ export default function AdminPage() {
                         </div>
                     </div>
 
+                    {/* Sidebar Stats */}
                     <div className="space-y-8">
                         <section className="p-8 rounded-3xl bg-white/5 border border-white/10">
                             <h2 className="text-xl font-semibold mb-6">Engine Heartbeat</h2>
                             <div className="space-y-6">
                                 <div className="flex justify-between items-center group">
                                     <span className="text-gray-500 group-hover:text-gray-400 transition-colors">Core Model</span>
-                                    <span className="text-sm font-mono bg-white/5 px-2 py-1 rounded">SigLIP-ViT</span>
+                                    <span className="text-sm font-mono bg-white/5 px-2 py-1 rounded">CLIP-ViT</span>
                                 </div>
                                 <div className="flex justify-between items-center group">
                                     <span className="text-gray-500 group-hover:text-gray-400 transition-colors">Vector Store</span>
@@ -490,13 +355,13 @@ export default function AdminPage() {
                                 </div>
                                 <div className="flex justify-between items-center group">
                                     <span className="text-gray-500 group-hover:text-gray-400 transition-colors">Dimension</span>
-                                    <span className="text-sm font-mono">768-dim</span>
+                                    <span className="text-sm font-mono">512-dim</span>
                                 </div>
                             </div>
 
                             <div className="mt-10 pt-8 border-t border-white/5">
                                 <div className="flex items-center justify-between mb-4">
-                                    <h4 className="text-xs uppercase tracking-widest text-gray-600 font-bold">Storage</h4>
+                                    <h4 className="text-xs uppercase tracking-widest text-gray-600 font-bold">Health</h4>
                                     <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
                                 </div>
                                 <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
@@ -515,6 +380,7 @@ export default function AdminPage() {
                 </div>
             </div>
 
+            {/* Image Lightbox */}
             <AnimatePresence>
                 {focusedImage && (
                     <motion.div
@@ -532,53 +398,16 @@ export default function AdminPage() {
                             className="relative max-w-4xl max-h-[85vh] w-full flex flex-col items-center"
                             onClick={(e) => e.stopPropagation()}
                         >
-                            <div className="relative inline-flex items-center justify-center max-h-[70vh] rounded-2xl overflow-hidden shadow-2xl bg-black/50">
-                                {focusedImage.video_url ? (
-                                    <video
-                                        src={focusedImage.video_url}
-                                        controls
-                                        autoPlay
-                                        className="max-h-[70vh] w-auto"
-                                        onLoadedMetadata={(e) => {
-                                            if (focusedImage.timestamp) {
-                                                e.currentTarget.currentTime = focusedImage.timestamp;
-                                            }
-                                        }}
-                                        onTimeUpdate={(e) => {
-                                            if (videoFrames.length > 0) {
-                                                const now = e.currentTarget.currentTime;
-                                                let closest = videoFrames[0];
-                                                for (const f of videoFrames) {
-                                                    if (f.timestamp <= now) closest = f;
-                                                    else break;
-                                                }
-                                                if (closest && closest.description !== currentDescription) {
-                                                    setCurrentDescription(closest.description);
-                                                }
-                                            }
-                                        }}
-                                    />
-                                ) : (
-                                    <img
-                                        src={focusedImage.photo_image_url}
-                                        alt={focusedImage.photo_id}
-                                        className="max-h-[70vh] w-auto"
-                                    />
-                                )}
-                            </div>
-                            <div className="mt-4 w-full max-w-2xl text-center flex flex-col items-center gap-2">
-                                <div className="flex items-center gap-4">
-                                    <p className="text-xs text-gray-500 font-mono">{focusedImage.photo_id}</p>
-                                    <button 
-                                        onClick={() => handleDelete(focusedImage.photo_id)}
-                                        className="flex items-center gap-1.5 px-3 py-1 bg-red-500/20 border border-red-500/30 rounded-full text-red-400 text-[10px] font-bold hover:bg-red-500 hover:text-white transition-all"
-                                    >
-                                        <Trash2 className="w-3 h-3" /> DELETE RECORD
-                                    </button>
-                                </div>
-                                {currentDescription && (
+                            <img
+                                src={focusedImage.photo_image_url}
+                                alt={focusedImage.photo_id}
+                                className="max-h-[70vh] w-auto rounded-2xl object-contain shadow-2xl"
+                            />
+                            <div className="mt-4 w-full max-w-2xl text-center space-y-2">
+                                <p className="text-xs text-gray-500 font-mono">{focusedImage.photo_id}</p>
+                                {focusedImage.description && (
                                     <p className="text-sm text-white/90 bg-white/5 border border-white/10 rounded-xl px-4 py-3 italic">
-                                        "{currentDescription}"
+                                        "{focusedImage.description}"
                                     </p>
                                 )}
                             </div>

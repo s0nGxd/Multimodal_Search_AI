@@ -5,6 +5,8 @@ This document tracks the key evolution points of the project to be included in t
 ## 1. User Interface (UI) Overhaul
 *Current Status: "Next-Gen Semantic Vision"*
 
+At the Interim stage, the frontend was a basic Streamlit application with standard light-mode styling, minimal interactivity, and rigid layout constraints imposed by the framework. The Final deliverable replaces this entirely with a custom Next.js + React interface, as described below.
+
 We have completely redesigned the frontend to move away from a basic prototype look to a professional, "Dark Mode" aesthetic that emphasizes the AI nature of the product.
 
 ### Key Visual Changes:
@@ -58,7 +60,7 @@ The following table summarizes the key deviations and improvements from the orig
 
 To meet the "Customisation" requirement that was flagged as a risk in the Interim Report, the following granular controls have been added to the Frontend:
 
-### 🎛️ Advanced Search Options
+### Advanced Search Options
 Users can now fine-tune the retrieval mechanism via a collapsible settings panel:
 1.  **Max Results (K)**: Slider (1-50). Allows users to broaden or narrow the search scope.
 2.  **Minimum Similarity (%)**: Slider (0% - 100%).
@@ -66,13 +68,18 @@ Users can now fine-tune the retrieval mechanism via a collapsible settings panel
     - **Frontend Transformation:** We convert the user's "Similarity" preference into a "Distance Threshold" for the backend using the formula: `Distance_Threshold = 1 - (Similarity_Percentage / 100)`.
     - **Example:** A 90% strictness setting sends a distance threshold of `0.1`, filtering out any vaguely related matches.
 
-### 🚀 Deployment Readiness
+### "See All Indexed Images" Admin Tab
+A new tab was added to the admin panel that displays every image currently in the LanceDB index alongside its BLIP-generated caption. This was not a client requirement — it was a UX improvement to give admins visibility into the database contents. It allows administrators to verify that ingested images were captioned correctly and to spot-check BLIP's output without running search queries.
+
+### Deployment Readiness
 - **Code Status:** Feature Complete.
-- **Next Step:** Deploy to **Railway** or **Render** with a Persistent Volume to ensure the LanceDB index survives server restarts (solving the "Online Amnesia" issue).
+- **Next Step:** Deploy to **Railway** or **Render** with a Persistent Volume to ensure the LanceDB index survives server restarts (solving the "Online Amnesia" issue). *(This deployment plan was later superseded — see Section 5 for the final deployment decision.)*
 
 ---
 
 ## 5. Considering Options To Take The Project Online
+
+The Interim Report described a local-only system with no deployment configuration. The following documents the complete process of taking the application online.
 
 The application runs perfectly locally but has no deployment configuration. To go "online", we need to:
 1. Deploy the **FastAPI backend** (with heavy ML models: CLIP ~600MB, BLIP ~1GB, PyTorch ~2GB) to a server with persistent storage.
@@ -134,7 +141,7 @@ After careful consideration of the fact that the client has asked us to only cre
 
 ---
 
-### 🚀 Milestone: Backend Successfully Deployed Online
+### Milestone: Backend Successfully Deployed Online
 
 The FastAPI backend is now **live** at: `https://aariz-s-segp-semantic-search.hf.space`
 
@@ -162,7 +169,7 @@ This is a significant transition — the project has moved from a local-only pro
 - **HF Spaces persistent `/data`**: LanceDB index and uploaded images survive container restarts.
 - **Root route added**: HF Spaces pings `GET /` for health checks; without it, the Space showed as broken despite the server running fine.
 
-#### 🌐 Frontend Goes Live — Connecting the Two Halves
+#### Frontend Goes Live — Connecting the Two Halves
 
 With the backend running, the next challenge was getting the frontend online and making the two halves talk to each other.
 
@@ -186,6 +193,8 @@ With the backend running, the next challenge was getting the frontend online and
 ---
 
 ## 6. Solving Persistent Storage on HF Spaces Free Tier (Testing)
+
+This section addresses a problem that was predicted in the Interim stage but only experienced after deployment. For the full technical implementation, see Problem Solution Log Topic 10.
 
 ### The Problem
 HF Spaces free tier has **ephemeral storage**. Container restarts wipe the LanceDB index and uploaded images — meaning any data ingested via the admin panel is lost when the Space sleeps or redeploys.
@@ -224,7 +233,7 @@ Container restarts → download from repo → fully restored
 
 ### Verification: Confirmed Working
 
-Persistence was tested on **17 Feb 2025** with the following procedure:
+Persistence was tested on **17 Feb 2026** with the following procedure:
 
 1. Three images were uploaded via the Admin panel (a black car photo and two AI-generated images).
 2. A search for *"a close up of a black car"* returned all three results with correct similarity scores.
@@ -313,7 +322,7 @@ The system was functionally complete but had severe performance bottlenecks that
 **6. IVF-PQ Index Auto-Creation**
 - After bulk ingestion, if table has >= 256 rows, an IVF-PQ index is automatically built.
 - `num_partitions = sqrt(row_count)`, `num_sub_vectors = 16`.
-- Converts brute-force O(n) search to approximate nearest neighbor O(log n).
+- Converts brute-force O(n) search to approximate nearest neighbor O(√n).
 - Index is rebuilt with `replace=True` so it stays current.
 - File: `server/app/services/ingestion_service.py`
 
@@ -333,7 +342,7 @@ The system was functionally complete but had severe performance bottlenecks that
 | Cold start (search-only) | ~60s (CLIP + BLIP) | ~30s (CLIP only) |
 | Repeated query latency | ~200ms (full CLIP inference) | <1ms (cache hit) |
 | Bulk ingestion (100 images) | ~5-10 min (sequential) | ~1-2 min (concurrent + batched) |
-| Search at 10k+ images | O(n) brute-force | O(log n) with IVF-PQ |
+| Search at 10k+ images | O(n) brute-force | O(√n) with IVF-PQ |
 
 ---
 
@@ -424,4 +433,188 @@ Scores now properly differentiate matches from non-matches. Exact caption search
 ### Lesson
 
 Each layer of search improvement (image vectors → rescaling → hybrid search) shifted the raw score distribution. Rescaling constants are not one-time values — they must be recalibrated whenever the underlying scoring mechanism changes. This is a general principle: any normalization layer must be validated end-to-end after upstream changes.
+
+---
+
+## 10. The Brute-Force to Intelligent Search Evolution (March 26, 2026)
+
+This is the single largest deviation from the Interim Report. At the Interim stage, the search pipeline was described as a straightforward CLIP vector lookup — embed the query, scan the table, return top-K. That description was accurate at the time. Between Interim and Final, the entire search, scoring, and ingestion pipeline was rebuilt without changing the underlying models (CLIP, BLIP) or database (LanceDB).
+
+> **For full technical detail** — including code snippets, git diffs, and implementation rationale — see **Problem Solution Log, Topic 15: "The Full Brute-Force to Intelligent Search Evolution."**
+
+### What Changed from the Interim Report
+
+The Interim Report described:
+- A **single-vector search** — one CLIP image embedding per record, brute-force scanned on every query.
+- **Raw cosine similarity** displayed directly as the "Match" score — correct results showed ~22%.
+- **No vector index** — every query was O(n), scanning every row.
+- **Sequential ingestion** — images downloaded and embedded one at a time.
+- **Eager model loading** — both CLIP and BLIP loaded at startup, even for search-only sessions.
+
+The Final Report now describes:
+- A **dual-vector hybrid search** — two CLIP embeddings per record (one from the image, one from the BLIP caption), with the better match winning per image.
+- **Perceptual score rescaling** — a linear normalisation mapping CLIP's actual output range to 0–100%, so correct matches display 50–100% and mismatches display 0–30%.
+- **IVF-PQ vector index** — automatically created after bulk ingestion (≥256 rows), converting O(n) brute-force to O(√n) approximate nearest neighbour.
+- **Concurrent + batched ingestion** — parallel image downloads (8 threads) and batched CLIP inference (16 images per forward pass).
+- **Lazy BLIP loading** — model loads only when captioning is first requested, halving cold start time for search-only sessions.
+- **LRU text embedding cache** — repeated queries return in <1ms instead of ~200ms.
+
+### Why This Deviation Was Necessary
+
+The Interim system was *correct* — it found the right images. But it had three problems that made it unsuitable as a final deliverable:
+
+1. **Scores were unintelligible.** A 22% score on a correct match looks like the system is broken. The Interim Report didn't address scoring because at that stage we hadn't yet tested with real users who would see these numbers. Once the UI displayed scores prominently (Section 1's "Next-Gen" redesign), the calibration problem became urgent.
+
+2. **Search couldn't scale beyond the demo dataset.** The Interim demo used ~10-50 images, where brute-force is fast enough. The Final system needed to handle the full Unsplash dataset (1000+ images) via the bulk CSV ingestion feature added during development. At that scale, O(n) search and sequential ingestion were impractical.
+
+3. **BLIP captions were wasted.** The system generated BLIP captions (introduced during development — see Section 11), but only used them for display. Searching for an image's own caption produced only ~50% match — a paradox that undermined user trust. The hybrid search fixes this by making captions a first-class search signal.
+
+### Summary of Impact
+
+| Metric | Interim | Final |
+| :--- | :--- | :--- |
+| Correct match score display | ~22% | **50–100%** |
+| Exact caption search accuracy | ~50-60% | **100%** |
+| Gap between match and non-match | ~10 percentage points | **20-70 percentage points** |
+| Cold start (search-only) | ~60s | **~30s** |
+| Repeated query latency | ~200ms | **<1ms** |
+| Bulk ingestion (100 images) | ~5-10 min | **~1-2 min** |
+| Search complexity | O(n) brute-force | **O(√n) with IVF-PQ** |
+
+### Files Modified
+
+The changes span six files across backend and frontend. See Sections 7–9 above for per-feature breakdowns, and Problem Solution Log Topic 15 for the complete code-level analysis.
+
+---
+
+## 11. BLIP Captioning as a Core Technology (March 26, 2026)
+
+The Interim Report described a single-model architecture powered by CLIP. The Final Report introduces a second AI model — **BLIP (Bootstrapping Language-Image Pre-training)** by Salesforce — which fundamentally changed how the system works.
+
+> **For full technical detail** — including the complete `CaptionService` implementation, design decisions (lazy loading, singleton pattern, model variant selection), and integration code — see **Problem Solution Log, Topic 16: "Introducing BLIP."**
+
+### What Changed from the Interim Report
+
+The Interim Report described:
+- A **single-model system** — CLIP handled all embedding and search.
+- **No image descriptions** — search results showed images and scores, with no explanation of *why* a result matched.
+- **A single vector per image** — the `ImageRecord` schema had three fields: `photo_id`, `photo_image_url`, `vector`.
+
+The Final Report now describes:
+- A **dual-model pipeline** — CLIP generates search vectors, BLIP generates human-readable captions. Each image passes through both models during ingestion.
+- **Auto-generated captions** — every uploaded image receives a natural language description (e.g., "a golden retriever running on the beach") displayed on hover in the search results.
+- **A richer schema** — `ImageRecord` now includes `description` (BLIP caption text) and `caption_vector` (CLIP embedding of the BLIP caption), enabling hybrid search.
+
+### Why BLIP Was Introduced
+
+BLIP was not in the original project plan. It was discovered during development when we identified three limitations of a CLIP-only system:
+
+1. **Opaque results.** Users saw images and scores but couldn't understand *why* something matched. BLIP captions bridge this gap — a search for "sunset" returning a photo captioned "a beautiful sunset over the ocean" feels self-explanatory.
+
+2. **Cross-modal similarity ceiling.** CLIP's text-to-image comparisons top out at ~0.35 cosine similarity even for strong matches (see Section 8, Hybrid Search). By embedding BLIP's text captions through CLIP's text encoder, we create a text-to-text comparison pathway that can reach 1.0 similarity — the basis for hybrid search (Section 8).
+
+3. **Accessibility.** BLIP captions double as alt-text, giving every indexed image a screen-reader-compatible description at no extra cost.
+
+### How It Connects to Other Changes
+
+BLIP is the single technology decision with the largest downstream impact:
+
+- **Hybrid search** (Section 8) exists because BLIP captions give each image a second, text-based vector to search against.
+- **Score recalibration** (Section 9) was necessary because hybrid search changed the similarity range from 0.10–0.35 to 0.40–1.00.
+- **Performance optimizations** (Section 7) include lazy BLIP loading and optional captioning for bulk imports — both responses to BLIP's ~30s load time and ~200ms per-image inference cost.
+- The **frontend caption display** (Section 1) was redesigned to show BLIP captions as hover overlays with frosted-glass styling.
+
+### Key Implementation Details for the Report
+
+| Aspect | Detail |
+| :--- | :--- |
+| Model | `Salesforce/blip-image-captioning-base` (~990MB) |
+| Loading strategy | Lazy — loads on first caption request, not at server startup |
+| Single upload / URL | Always captioned |
+| Bulk CSV import | Optional via `generate_captions` flag (default: off for speed) |
+| Uncaptioned images | Still searchable via CLIP image vectors; caption vector set to zero vector |
+| Caption display | Hover overlay, italicised, line-clamped to 2 lines |
+| Inference cost | ~200ms per image on CPU |
+
+---
+
+## 12. Benchmarking the Captioning Model — Discovering BLIP's Limits (March 26, 2026)
+
+This section was not anticipated in the Interim Report. After implementing BLIP and hybrid search, we ran the first rigorous benchmark of the system's end-to-end search accuracy, revealing a measurable ceiling tied to caption quality.
+
+> **For full technical detail** — including failure analysis, caption quality audit, and the WyseTime business context — see **Problem Solution Log, Topic 17: "Benchmarking BLIP."**
+
+### What Was Measured
+
+A 15-query test suite was run against 9 indexed images, ranging from literal descriptions to abstract/semantic queries. Results:
+
+| Metric | Score |
+| :--- | :--- |
+| Precision@1 (correct result is #1) | 12/15 = **80.0%** |
+| Precision@3 (correct in top 3) | 13/15 = **86.7%** |
+| Mean Reciprocal Rank (MRR) | **0.84** |
+| Avg Cosine Similarity | **0.79** |
+
+### Where It Fails
+
+The 3 failures all involve **semantic reasoning** — queries like "wildlife in Africa" (expected: elephants, got: goat at rank 6), "agricultural scene with livestock" (expected: goat, got: mountain at rank 3), and "fashion portrait" (expected: woman in red dress, got: railroad at rank 10). BLIP's literal captions ("a couple of elephants walking down a dirt road") lack the semantic depth to connect images to abstract concepts.
+
+### Caption Quality Issues
+
+Manual audit revealed BLIP produces:
+- **Hallucinations:** `"a group of women in sari sari sari sari sari sari sari sar"` — repetition loop
+- **Shallow descriptions:** `"a man wearing a hat"` for a photo containing ~8 salient details (glasses, veteran's insignia, second person, indoor setting)
+- **Missing context:** `"two people sitting on a track"` — fails to identify it as a railroad
+
+### Why This Matters for WyseTime
+
+WyseTime Technologies (Penang, Malaysia) — the project's client — specialises in AI computer vision for security and surveillance, including feature-based image retrieval. For their use case, the gap between BLIP's `"a man wearing a hat"` and a richer description mentioning glasses, clothing details, a second person, and the setting is operationally critical. Missing identifying details in surveillance footage has real consequences.
+
+This benchmark establishes a quantified baseline (P@1: 80%, MRR: 0.84) and identifies captioning quality — not the search architecture — as the specific bottleneck to improve.
+
+---
+
+## 13. The Gemini Experiment — Model Evaluation and Decision (March 27, 2026)
+
+After benchmarking BLIP's limitations (Section 12), we investigated replacing it with **Google Gemini 3.1 Flash Lite** — a far more capable multimodal model. This section documents the experiment and the evidence-based decision to stay with BLIP.
+
+> **For full technical detail** — including the SDK vs REST API implementation challenge, per-query win/loss analysis, and the CLIP compatibility explanation — see **Problem Solution Log, Topic 18: "The Gemini Experiment."**
+
+### What Changed from the Interim Report
+
+The Interim Report did not mention model evaluation or benchmarking. The Final Report now includes a rigorous A/B comparison between two captioning models, demonstrating hypothesis-driven engineering: identify bottleneck → propose alternative → benchmark → decide.
+
+### The Benchmark: BLIP vs Gemini
+
+| Metric | BLIP | Gemini 3.1 Flash Lite | Delta |
+| :--- | :--- | :--- | :--- |
+| Precision@1 | 80.0% | 73.3% | -6.7pp |
+| Precision@3 | 86.7% | 86.7% | 0 |
+| MRR | 0.84 | 0.81 | -0.03 |
+| Avg Cosine Similarity | 0.79 | 0.37 | -0.42 |
+| Ingestion time (10 imgs) | ~3s | 150s | 50x slower |
+
+### The Paradox
+
+Gemini produces objectively better captions — richer, more detailed, more semantically aware. But search accuracy *dropped*. The reason: **CLIP's text encoder was trained on short, simple captions** (the kind BLIP produces). Gemini's 50-word descriptions create diluted embeddings where no single concept is strongly represented. BLIP and CLIP are from the same era (2021-2022) and naturally aligned — this compatibility is an architectural strength.
+
+Gemini fixed the hard queries (e.g., "wildlife in Africa" jumped from rank 6 to rank 1) but hurt the easy ones (e.g., "person cutting a cake" dropped from rank 1 to rank 6).
+
+### Implementation Note
+
+Integrating Gemini initially proved difficult — Google's Python SDK had dependency conflicts with our `transformers` + `torch` stack, and `gcloud auth` doesn't work in headless Docker containers. The solution came from the **client's earlier recommendation to use REST APIs** for external integrations. A direct HTTP call to the Gemini endpoint (`requests.post()` with an API key) bypassed all SDK and authentication issues. The client's advice, given in a completely different context, directly unblocked this work.
+
+### The Decision: Stay with CLIP + BLIP
+
+We decided to keep the existing pipeline based on:
+
+1. **Aggregate metrics favour BLIP** — P@1 80% vs 73.3%, the most important metric for a search engine
+2. **50x ingestion slowdown is prohibitive** — 3s vs 150s for 10 images; bulk imports would take hours
+3. **No external dependency** — BLIP runs locally with no API keys, no network, no rate limits
+4. **CLIP+BLIP natural alignment** — same-era models trained on similar data, optimised for each other
+5. **Gemini's wins are edge cases** — 3 out of 15 queries improved, 2 regressed
+
+### What This Demonstrates
+
+The Gemini experiment was not a failure — it produced documented evidence of methodical model evaluation. It shows the team can identify a bottleneck, investigate alternatives rigorously, and make a data-driven decision to stay the course when the numbers don't support a change. For WyseTime, this demonstrates the kind of engineering discipline they'd expect from a production system.
 
