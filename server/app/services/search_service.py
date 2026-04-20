@@ -1,5 +1,6 @@
 import os
 from collections import OrderedDict
+import re
 import lancedb
 import torch
 import numpy as np
@@ -7,9 +8,61 @@ import pandas as pd
 from transformers import AutoModel, AutoProcessor
 from PIL import Image
 
+
+# ── Words to strip when extracting the PRIMARY NOUN from a query ──────────
+# These are adjectives, colours, sizes, articles, prepositions, and filler
+# words that describe an object but are NOT the object itself.
+_MODIFIERS = {
+    # colours
+    'red', 'blue', 'green', 'yellow', 'black', 'white', 'brown', 'orange',
+    'purple', 'pink', 'grey', 'gray', 'golden', 'silver', 'dark', 'light',
+    'bright', 'pale', 'beige', 'tan', 'cream',
+    # size / age / shape
+    'large', 'small', 'big', 'tiny', 'tall', 'short', 'long', 'old', 'young',
+    'round', 'thin', 'thick', 'wide', 'narrow', 'huge', 'little', 'massive',
+    # texture / quality
+    'fluffy', 'furry', 'smooth', 'rough', 'shiny', 'soft', 'hard',
+    # filler / articles / prepositions
+    'a', 'an', 'the', 'in', 'on', 'at', 'with', 'and', 'or', 'of', 'for',
+    'is', 'to', 'by', 'from', 'its', 'this', 'that',
+    # common query filler words
+    'color', 'colour', 'colored', 'coloured', 'looking', 'like', 'type',
+    'kind', 'style', 'very', 'really', 'quite', 'pretty', 'beautiful',
+}
+
+
+def _extract_nouns(phrase: str) -> list[str]:
+    """Extract meaningful content nouns from a query, stripping modifiers.
+
+    'brown color dog running' → ['dog', 'running']
+    'small black cat'         → ['cat']
+    'woman in red jacket'     → ['woman', 'jacket']
+    """
+    words = [w.lower().strip(".,!?") for w in phrase.split() if len(w) > 1]
+    nouns = [w for w in words if w not in _MODIFIERS]
+    return nouns if nouns else words
+
+
+def _extract_adjectives(phrase: str) -> list[str]:
+    """Extract modifier/adjective words from a query.
+
+    'brown color dog' → ['brown']
+    'small black cat' → ['small', 'black']
+    """
+    words = [w.lower().strip(".,!?") for w in phrase.split() if len(w) > 1]
+    # Only return words that ARE in the modifier set and are visually meaningful
+    visual_modifiers = {
+        'red', 'blue', 'green', 'yellow', 'black', 'white', 'brown', 'orange',
+        'purple', 'pink', 'grey', 'gray', 'golden', 'silver', 'dark', 'light',
+        'large', 'small', 'big', 'tiny', 'tall', 'short', 'long', 'old', 'young',
+        'fluffy', 'furry', 'smooth', 'shiny',
+    }
+    return [w for w in words if w in visual_modifiers]
+
+
 class SearchService:
     _instance = None
-    
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(SearchService, cls).__new__(cls)
@@ -19,33 +72,37 @@ class SearchService:
     def _initialize(self):
         print("Initializing SearchService...")
         self.db_uri = os.getenv("LANCEDB_URI", "./lancedb_db")
-        self.model_name = os.getenv("EMBED_MODEL", "google/siglip-base-patch16-256")
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model_name = os.getenv("EMBED_MODEL", "google/siglip-so400m-patch14-384")
 
-        # Text embedding cache (LRU, max 128 entries)
+        if torch.cuda.is_available():
+            self.device = "cuda"
+        elif torch.backends.mps.is_available():
+            self.device = "mps"
+        else:
+            self.device = "cpu"
+
         self._text_cache = OrderedDict()
         self._text_cache_max = 128
 
-        # Load Model (AutoModel supports CLIP, SigLIP, and other vision-language models)
         print(f"Loading vision-language model: {self.model_name} on {self.device}")
         self.model = AutoModel.from_pretrained(self.model_name, use_safetensors=True).to(self.device)
         self.processor = AutoProcessor.from_pretrained(self.model_name)
         self.model.eval()
 
-        # Connect to DB
         self.db = lancedb.connect(self.db_uri)
         try:
             self.table = self.db.open_table("images")
-        except:
+        except Exception:
             print("Table 'images' not found. It will need to be created via ingestion.")
             self.table = None
 
     def refresh_table(self):
-        """Re-opens the table in case it was created/updated."""
         try:
             self.table = self.db.open_table("images")
-        except:
+        except Exception:
             self.table = None
+
+    # ── Embedding helpers ──────────────────────────────────────────────────
 
     @torch.no_grad()
     def embed_text(self, text: str) -> np.ndarray:
@@ -56,59 +113,119 @@ class SearchService:
 
         inputs = self.processor(text=[text], return_tensors="pt", padding=True, truncation=True).to(self.device)
         text_features = self.model.get_text_features(**inputs)
-
         if hasattr(text_features, "pooler_output"):
             text_features = text_features.pooler_output
-
         text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True)
         result = text_features.cpu().numpy().astype("float32")[0]
 
         self._text_cache[cache_key] = result
         if len(self._text_cache) > self._text_cache_max:
             self._text_cache.popitem(last=False)
-
         return result
 
     @torch.no_grad()
     def embed_image(self, image: Image.Image) -> np.ndarray:
         inputs = self.processor(images=image, return_tensors="pt").to(self.device)
         image_features = self.model.get_image_features(**inputs)
-
         if hasattr(image_features, "pooler_output"):
             image_features = image_features.pooler_output
-
         image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
         return image_features.cpu().numpy().astype("float32")[0]
 
     @torch.no_grad()
-    def embed_images_batch(self, images: list[Image.Image], batch_size: int = 16) -> list[np.ndarray]:
+    def embed_images_batch(self, images: list, batch_size: int = 16) -> list:
         all_vectors = []
         for i in range(0, len(images), batch_size):
             batch = images[i:i + batch_size]
             inputs = self.processor(images=batch, return_tensors="pt", padding=True).to(self.device)
             image_features = self.model.get_image_features(**inputs)
-
             if hasattr(image_features, "pooler_output"):
                 image_features = image_features.pooler_output
-
             image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
             vectors = image_features.cpu().numpy().astype("float32")
             all_vectors.extend([vectors[j] for j in range(len(batch))])
         return all_vectors
 
-    def search(self, query: str, k: int = 20, threshold: float = 0.20) -> list[dict]:
-        """Hybrid search using 3 channels fused via Reciprocal Rank Fusion (RRF).
-        
-        Channels:
-          1. Image vector search  — visual similarity (SigLIP image embedding)
-          2. Caption vector search — semantic text match (SigLIP text embedding vs caption)
-          3. BM25 full-text search — exact keyword match on the description field
+    # ── Description-based object scoring ───────────────────────────────────
 
-        The vector channels use a 'a photo of {query}' prompt template for improved
-        SigLIP accuracy. BM25 uses the raw query for exact keyword matching.
+    @staticmethod
+    def _description_match_score(query: str, description: str) -> tuple[float, float]:
+        """Score how well the stored description confirms the query object.
 
-        Results are merged with RRF. Each result carries its _rrf_score so the router
-        can display it as a normalized, intuitive percentage.
+        Uses a two-tier approach:
+          1. PRIMARY NOUN match: Does the description mention the core object?
+             This is the decisive filter — pass or fail.
+          2. ADJECTIVE match: Among confirmed objects, do the adjectives match?
+             This is a ranking bonus, not a filter.
+
+        Returns (noun_score, adjective_bonus) where:
+          noun_score:       0.0 (no match) or 0.85–1.0 (confirmed)
+          adjective_bonus:  0.0–0.10 (how many adjectives also match)
+        """
+        desc = description.lower()
+        q = query.strip().lower()
+
+        # ── Noun matching (the PRIMARY signal) ────────────────────────
+        nouns = _extract_nouns(q)
+        if not nouns:
+            return (0.0, 0.0)
+
+        # Check whole-word matches only ('dog' must not match 'hotdog')
+        noun_hits = sum(1 for n in nouns if re.search(r'\b' + re.escape(n) + r'\b', desc))
+        noun_ratio = noun_hits / len(nouns)
+
+        if noun_ratio <= 0:
+            return (0.0, 0.0)
+
+        # Full phrase match is best
+        if re.search(r'\b' + re.escape(q) + r'\b', desc):
+            noun_score = 1.0
+        elif noun_ratio >= 1.0:
+            noun_score = 0.92       # all nouns present, different order
+        else:
+            noun_score = 0.85       # at least one core noun confirmed
+
+        # ── Adjective matching (RANKING bonus only) ───────────────────
+        adjectives = _extract_adjectives(q)
+        if adjectives:
+            adj_hits = sum(1 for a in adjectives
+                           if re.search(r'\b' + re.escape(a) + r'\b', desc))
+            adjective_bonus = (adj_hits / len(adjectives)) * 0.07
+        else:
+            adjective_bonus = 0.0
+
+        return (noun_score, adjective_bonus)
+
+    # ── Main search ────────────────────────────────────────────────────────
+
+    def search(self, query: str, k: int = 20, threshold: float = 0.20,
+               deep_search: bool = False) -> list:
+        """Description-first hybrid search.
+
+        Architecture
+        ------------
+        The key insight: Florence-2 already identified every object at upload
+        time.  The stored description IS the ground truth for object identity.
+
+        Layer 1 — Retrieval (SigLIP ANN + BM25):
+          Fast candidate retrieval (~60 items, <1s).
+
+        Layer 2 — Object Identification (Description Match):
+          PRIMARY SIGNAL. If the core noun from the query appears in the
+          stored description, the image is confirmed.  Adjectives (brown,
+          small) are used as a ranking bonus, not a filter.
+
+        Layer 3 — Ranking:
+          Confirmed images:   0.85–0.99 (noun match + adj bonus + rank bonus)
+          Unconfirmed images: 0.05–0.25 (visual rank only, always below threshold)
+
+        Layer 4 — Deep Search (optional, ~30s):
+          Florence-2 phrase-grounding on top 8 CONFIRMED results.
+          Only boosts already-confirmed results — never promotes unconfirmed ones.
+
+        Score ranges (with default 0.80 threshold):
+          0.85–0.99  =  Description confirms the object
+          0.05–0.25  =  Visually similar but description doesn't match → filtered
         """
         if self.table is None:
             self.refresh_table()
@@ -117,174 +234,161 @@ class SearchService:
 
         vector_query = f"a photo of {query.strip()}"
         query_vec = self.embed_text(vector_query)
-        select_cols = ["photo_id", "photo_image_url", "video_url", "timestamp", "description", "_distance"]
+        select_cols = [
+            "photo_id", "photo_image_url", "video_url",
+            "timestamp", "description", "_distance"
+        ]
         ranked_lists = []
 
-        # We query wider nets (k * 2) so we have enough candidates before filtering via threshold at the end
+        # ── Layer 1a: Image vector ANN ───────────────────────────────────
         try:
-            df = (
-                self.table.search(query_vec, vector_column_name="vector")
-                .metric("cosine")
-                .limit(k * 2)
-                .select(select_cols)
-                .to_pandas()
-            )
+            df = (self.table.search(query_vec, vector_column_name="vector")
+                  .metric("cosine").limit(k * 3).select(select_cols).to_pandas())
             ranked_lists.append(df)
         except Exception as e:
-            print(f"Image vector search failed: {e}")
+            print(f"Image ANN failed: {e}")
 
+        # ── Layer 1b: Caption vector ANN ─────────────────────────────────
         try:
-            df = (
-                self.table.search(query_vec, vector_column_name="caption_vector")
-                .metric("cosine")
-                .limit(k * 2)
-                .select(select_cols)
-                .to_pandas()
-            )
+            df = (self.table.search(query_vec, vector_column_name="caption_vector")
+                  .metric("cosine").limit(k * 3).select(select_cols).to_pandas())
             ranked_lists.append(df)
         except Exception as e:
-            print(f"Caption vector search failed: {e}")
+            print(f"Caption ANN failed: {e}")
 
+        # ── Layer 1c: BM25 full-text ─────────────────────────────────────
+        bm25_pids: set = set()
         try:
-            fts_df = (
-                self.table.search(query, query_type="fts")
-                .limit(k * 2)
-                .select(["photo_id", "photo_image_url", "video_url", "timestamp", "description"])
-                .to_pandas()
-            )
+            fts_df = (self.table.search(query, query_type="fts")
+                      .limit(k * 3)
+                      .select(["photo_id", "photo_image_url", "video_url",
+                               "timestamp", "description"])
+                      .to_pandas())
             fts_df["_distance"] = 1.0
-            fts_df["_bm25_found"] = True
             ranked_lists.append(fts_df)
+            bm25_pids = set(str(p) for p in fts_df["photo_id"].tolist())
         except Exception as e:
-            print(f"BM25 search skipped: {e}")
+            print(f"BM25 skipped: {e}")
 
+        # ── RRF Fusion ───────────────────────────────────────────────────
         RRF_K = 60
-        rrf_scores: dict[str, float] = {}
-        best_row: dict[str, dict] = {}
+        rrf_scores: dict = {}
+        best_row: dict = {}
 
         for result_df in ranked_lists:
             if result_df is None or result_df.empty:
                 continue
             for rank, (_, row) in enumerate(result_df.iterrows()):
-                pid = row["photo_id"]
+                pid = str(row["photo_id"])
                 rrf_scores[pid] = rrf_scores.get(pid, 0.0) + 1.0 / (RRF_K + rank + 1)
-                
-                row_dist = float(row.get("_distance", 1.0))
-                is_bm25 = bool(row.get("_bm25_found", False))
-                
                 if pid not in best_row:
                     best_row[pid] = row.to_dict()
-                else:
-                    if row_dist < float(best_row[pid].get("_distance", 1.0)):
-                        best_row[pid]["_distance"] = row_dist
-                    if is_bm25:
-                        best_row[pid]["_bm25_found"] = True
 
         if not rrf_scores:
             return []
 
-        top_candidates = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)[:15]
-        
-        from app.services.detection_service import detection_service
-        import os
-        from PIL import Image
-        
-        for pid in top_candidates:
+        # ── Layer 2 + 3: Description scoring ─────────────────────────────
+        sorted_pids = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)
+        total = len(sorted_pids)
+
+        for rank_pos, pid in enumerate(sorted_pids):
             row = best_row[pid]
-            url = row.get("photo_image_url", "")
-            if "/images/" in url:
+            desc = str(row.get("description", ""))
+
+            noun_score, adj_bonus = self._description_match_score(query, desc)
+
+            # BM25 floor: only if BM25 matched AND the core noun appears
+            # in the description (prevents "brown horse" from being confirmed
+            # for query "brown dog")
+            if noun_score == 0.0 and pid in bm25_pids:
+                nouns = _extract_nouns(query)
+                desc_lower = desc.lower()
+                if nouns and any(re.search(r'\b' + re.escape(n) + r'\b', desc_lower)
+                                 for n in nouns):
+                    noun_score = 0.85
+
+            # Visual rank tiebreaker (tiny, just for ordering within same tier)
+            rank_bonus = max(0.0, 0.05 * (1.0 - rank_pos / max(total, 1)))
+
+            if noun_score > 0:
+                # CONFIRMED: core noun is in description
+                combined = noun_score + adj_bonus + rank_bonus
+            else:
+                # NOT CONFIRMED: low score, will be filtered by threshold
+                combined = 0.05 + rank_bonus
+
+            best_row[pid]["_noun_score"] = noun_score
+            best_row[pid]["_combined_score"] = min(0.99, combined)
+
+        # ── Layer 4: Florence-2 Deep Search (optional, top 8 confirmed) ──
+        DEEP_LIMIT = 8
+        if deep_search:
+            from app.services.caption_service import caption_service
+
+            # ONLY run on CONFIRMED results (noun_score > 0)
+            confirmed = [p for p in sorted_pids
+                         if best_row[p].get("_noun_score", 0) > 0][:DEEP_LIMIT]
+
+            print(f"[Deep Search] Florence-2 grounding on {len(confirmed)} confirmed candidates…")
+            for pid in confirmed:
+                row = best_row[pid]
+                url = row.get("photo_image_url", "")
+                if "/images/" not in url:
+                    continue
                 file_name = url.split("/images/")[-1]
                 local_path = os.path.join("data", file_name)
-                if os.path.exists(local_path):
-                    try:
-                        img = Image.open(local_path).convert("RGB")
-                        img.thumbnail((768, 768)) # aggressive optimization for huge memory bounds
-                        det = detection_service.detect(img, query)
-                        if det:
-                            score = det.get("score", 0)
-                            best_row[pid]["_detection_score"] = score # Store raw score for dynamic scaling
-                            if score > 0.15:
-                                rrf_scores[pid] += (score * 10.0)
-                            elif score > 0.05:
-                                rrf_scores[pid] += (score * 2.0)
-                    except Exception as e:
-                        pass 
+                if not os.path.exists(local_path):
+                    continue
+                try:
+                    img = Image.open(local_path).convert("RGB")
+                    img.thumbnail((800, 800))
+                    grounding = caption_service.ground_phrase(img, query)
+                    best_row[pid]["_verified"] = grounding["found"]
+                    best_row[pid]["_f2_score"] = grounding["score"]
+                    best_row[pid]["_f2_box"] = grounding["box"]
+                    if grounding["found"]:
+                        # Small bonus to already-confirmed result — never
+                        # exceeds current score + 0.04 (prevents over-boosting)
+                        current = best_row[pid]["_combined_score"]
+                        best_row[pid]["_combined_score"] = min(0.99,
+                            current + 0.03)
+                    print(f"  [{pid}] found={grounding['found']} "
+                          f"score={grounding['score']:.3f}")
+                except Exception as e:
+                    print(f"  Florence-2 error for {pid}: {e}")
 
-        sorted_pids = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)
-
-        SIM_FLOOR = 0.15
-        SIM_CEIL = 1.00
-
-        def rescale_dist(dist: float) -> float:
-            raw_sim = 1.0 - dist
-            scaled = (raw_sim - SIM_FLOOR) / (SIM_CEIL - SIM_FLOOR)
-            return max(0.0, min(1.0, scaled))
-
-        seen_videos = set()
+        # ── Build final result list ──────────────────────────────────────
+        seen_videos: set = set()
         results = []
-        for pid in sorted_pids:
+
+        final_order = sorted(
+            best_row.keys(),
+            key=lambda p: best_row[p].get("_combined_score", 0),
+            reverse=True
+        )
+
+        for pid in final_order:
             row = best_row[pid].copy()
-            v_url = row.get("video_url", "")
-            
+            v_url = str(row.get("video_url") or "").strip()
+
             if v_url and v_url in seen_videos:
                 continue
             if v_url:
                 seen_videos.add(v_url)
-                
-            dist = float(row.get("_distance", 1.0))
-            det_score = float(row.get("_detection_score", 0.0))
 
-            # --- TIERED KEYWORD MATCHING ---
-            desc = row.get("description", "").lower()
-            norm_query = query.strip().lower()
-            q_words = [w.lower() for w in norm_query.split() if len(w) > 2]
-
-            is_full_match = row.get("_bm25_found", False) or (norm_query in desc)
-            
-            # Calculate Proportional Match Ratio (Matched Words / Total Words)
-            matched_words = [w for w in q_words if w in desc]
-            match_ratio = len(matched_words) / len(q_words) if q_words else 0.0
-
-            # 1. Base Score from SigLIP (Visual Foundation)
-            final_sim = rescale_dist(dist)
-
-            # 2. ASYMPTOTIC BOOSTING (Gap Closure Math)
-            
-            # PHYSICAL DETECTION (OWL-ViT) - High Weight (80% gap closure)
-            if det_score > 0.10:
-                # If OWL-ViT is confident (e.g. 0.70 for brown dog), close 80% of the gap
-                # based on that confidence.
-                detection_weight = 0.80 * det_score
-                final_sim += (1.0 - final_sim) * detection_weight
-            elif rrf_scores[pid] >= 1.0:
-                # Small generic boost if channels agree
-                final_sim += (1.0 - final_sim) * 0.10
-
-            # DESCRIPTION MATCH (Textual Bonus) - Lower Weight
-            if is_full_match:
-                # Full Phrase Match: Close 60% of the remaining gap
-                final_sim += (1.0 - final_sim) * 0.60
-            elif match_ratio > 0:
-                # Partial Match: Close 35% of the remaining gap based on match ratio
-                final_sim += (1.0 - final_sim) * (0.35 * match_ratio)
-
-            # No hard floors (max calls) anymore. 
-            # This allows the SigLIP color penalty to actually lower the score.
-
-            # Cap at 99.9%
-            final_sim = min(0.999, final_sim)
-
-            
+            final_sim = row.get("_combined_score", 0.0)
             if final_sim < threshold:
                 continue
-                
-            row["_rrf_score"] = rrf_scores[pid]
+
             row["similarity_score"] = final_sim
-            
+            row["verified"] = bool(row.get("_verified", False))
+            row["florence_box"] = row.get("_f2_box", None)
             results.append(row)
+
             if len(results) >= k:
                 break
-                
+
         return results
+
 
 search_service = SearchService()

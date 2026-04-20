@@ -1,5 +1,6 @@
 import os
 import io
+import mimetypes
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional
@@ -17,10 +18,8 @@ from .persistence_service import sync_to_repo
 
 load_dotenv()
 
-# Must match the embedding dimension of the configured model.
-# SigLIP base-patch16-256 (default) → 768. CLIP base-patch32 → 512.
-EMBED_DIM = int(os.getenv("EMBED_DIM", "768"))
-
+# SigLIP So400M uses 1152 dimension
+EMBED_DIM = int(os.getenv("EMBED_DIM", "1152"))
 
 class ImageRecord(LanceModel):
     photo_id: str
@@ -49,18 +48,14 @@ class IngestionService:
         self.data_dir.mkdir(exist_ok=True)
 
     def process_upload(self, file_contents: bytes, filename: str):
-        # 1. Check if this file (by original stem) already exists in DB
-        # This prevents re-indexing the same file multiple times
         original_id = Path(filename).stem
         if search_service.table is not None:
             df = search_service.table.to_pandas()
-            # Check if photo_id or video_url contains this stem
             exists = any(df['photo_id'] == original_id) or any(df['video_url'].str.contains(filename, na=False))
             if exists:
                 print(f"Skipping {filename}: already exists in database.")
                 return {"id": original_id, "status": "skipped", "message": "Already exists"}
 
-        # 2. Generate unique filename for storage safety
         timestamp = int(pd.Timestamp.now().timestamp())
         path_obj = Path(filename)
         unique_filename = f"{path_obj.stem}_{timestamp}{path_obj.suffix}"
@@ -69,7 +64,6 @@ class IngestionService:
         with open(file_path, "wb") as f:
             f.write(file_contents)
 
-        import mimetypes
         mime_type, _ = mimetypes.guess_type(unique_filename)
         ext = path_obj.suffix.lower()
         is_video = (mime_type and mime_type.startswith("video/")) or ext in [".mp4", ".mov", ".avi", ".webm", ".mkv"]
@@ -88,9 +82,9 @@ class IngestionService:
         description = caption_service.generate_caption(img)
         caption_vector = search_service.embed_text(description)
 
-        photo_url = f"/images/{filename}"
+        photo_url = f"/images/{unique_filename}"
         record = ImageRecord(
-            photo_id=file_path.stem,
+            photo_id=original_id,
             photo_image_url=photo_url,
             description=description,
             vector=vector,
@@ -98,7 +92,7 @@ class IngestionService:
         )
         self._insert_records([record])
         sync_to_repo()
-        return {"id": file_path.stem, "url": photo_url, "description": description, "status": "indexed"}
+        return {"id": original_id, "url": photo_url, "description": "Single image indexed", "status": "indexed"}
 
     def _process_video_upload(self, file_path: Path, filename: str):
         import cv2
@@ -181,7 +175,7 @@ class IngestionService:
         )
         self._insert_records([record])
         sync_to_repo()
-        return {"id": pid, "url": url, "description": description, "status": "indexed"}
+        return {"id": pid, "url": url, "description": "URL image indexed", "status": "indexed"}
 
     def process_bulk_csv(self, csv_path: str, limit: int = 100, generate_captions: bool = False, max_workers: int = 8, batch_size: int = 16):
         try:
@@ -189,7 +183,6 @@ class IngestionService:
         except Exception as e:
             raise ValueError(f"Failed to read CSV: {e}")
 
-        # Phase 1: Download images concurrently
         print(f"Downloading up to {len(df)} images with {max_workers} threads...")
         downloaded = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -206,12 +199,9 @@ class IngestionService:
             return {"processed": 0, "status": "completed"}
 
         print(f"Downloaded {len(downloaded)} images. Generating embeddings in batches of {batch_size}...")
-
-        # Phase 2: Batch embed all images through CLIP
         images = [img for _, _, img in downloaded]
         vectors = search_service.embed_images_batch(images, batch_size=batch_size)
 
-        # Phase 3: Optionally caption (expensive — off by default for bulk)
         import numpy as np
         zero_vec = np.zeros(EMBED_DIM, dtype="float32")
         records = []
@@ -230,13 +220,9 @@ class IngestionService:
                 caption_vector=cap_vec,
             ))
 
-        # Phase 4: Insert all records at once
         print(f"Inserting {len(records)} records into LanceDB...")
         self._insert_records(records)
-
-        # Phase 5: Build IVF-PQ index if table is large enough
         self._maybe_create_index()
-
         sync_to_repo()
         return {"processed": len(records), "status": "completed"}
 
@@ -248,8 +234,6 @@ class IngestionService:
         except Exception:
             table = db.create_table("images", schema=ImageRecord, data=records)
 
-        # Build/refresh BM25 full-text search index on the description field
-        # so that keyword queries (Channel 3) can find exact matches.
         try:
             table.create_fts_index("description", replace=True)
         except Exception as e:
@@ -267,8 +251,8 @@ class IngestionService:
                 print(f"Skipping index creation: {row_count} rows < {min_rows} minimum")
                 return
             num_partitions = max(2, int(row_count ** 0.5))
-            num_sub_vectors = 16
-            print(f"Building IVF-PQ index: {row_count} rows, {num_partitions} partitions, {num_sub_vectors} sub-vectors...")
+            num_sub_vectors = min(16, EMBED_DIM) 
+            print(f"Building IVF-PQ index: {row_count} rows...")
             table.create_index(
                 metric="cosine",
                 num_partitions=num_partitions,
@@ -278,6 +262,5 @@ class IngestionService:
             print("IVF-PQ index built successfully.")
         except Exception as e:
             print(f"Index creation skipped or failed: {e}")
-
 
 ingestion_service = IngestionService()

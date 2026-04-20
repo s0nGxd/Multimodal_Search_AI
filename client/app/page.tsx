@@ -13,15 +13,17 @@ export default function Home() {
     const [hasSearched, setHasSearched] = useState(false);
     const [resultCount, setResultCount] = useState(20);
     const [minSimilarity, setMinSimilarity] = useState(0.8);
+    const [deepSearch, setDeepSearch] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
     const [focusedImage, setFocusedImage] = useState<SearchResult | null>(null);
     const [bboxes, setBboxes] = useState<TrackResult[]>([]);
+    const [bboxLoading, setBboxLoading] = useState(false);
     const videoRef = useRef<HTMLVideoElement>(null);
     const lastDetectTime = useRef<number>(0);
     const [isDetecting, setIsDetecting] = useState(false);
     const [videoFrames, setVideoFrames] = useState<VideoFrame[]>([]);
     const [currentDescription, setCurrentDescription] = useState("");
-    
+
     // --- Backend Readiness State ---
     const [backendReady, setBackendReady] = useState<boolean | null>(null);
 
@@ -47,20 +49,33 @@ export default function Home() {
             setBboxes([]);
             trackStates.current.clear();
             setCurrentDescription(focusedImage.description || "");
-            
+
             if (focusedImage.video_url) {
                 getVideoFrames(focusedImage.video_url).then(setVideoFrames).catch(console.error);
             } else {
                 setVideoFrames([]);
             }
 
-            // TRIGGER INITIAL SCAN: Fix for static images and background objects
-            if (query && hasSearched) {
+            if (query && hasSearched && !focusedImage.video_url) {
                 lastDetectTime.current = 0;
-                // We use the original high-res URL for the initial static scan
-                trackObject(focusedImage.photo_image_url, query, focusedImage.video_url, focusedImage.video_url)
-                    .then(res => setBboxes(res.tracks || []))
-                    .catch(console.error);
+
+                // If Deep Search already ran, the Florence-2 box is pre-computed — use it instantly
+                if (focusedImage.florence_box) {
+                    const [x1, y1, x2, y2] = focusedImage.florence_box;
+                    setBboxes([{ track_id: 0, bbox: [x1, y1, x2, y2], score: focusedImage.score ?? 1 }]);
+                } else {
+                    // Fallback: run Grounding DINO live
+                    setBboxLoading(true);
+                    trackObject(focusedImage.photo_image_url, query, undefined, focusedImage.photo_image_url)
+                        .then(res => {
+                            setBboxes(res.tracks || []);
+                            setBboxLoading(false);
+                        })
+                        .catch(err => {
+                            console.error(err);
+                            setBboxLoading(false);
+                        });
+                }
             }
         }
     }, [focusedImage]);
@@ -71,7 +86,7 @@ export default function Home() {
 
         const now = video.currentTime;
 
-        if (!isDetecting && Math.abs(now - lastDetectTime.current) >= 0.2) {
+        if (!isDetecting && Math.abs(now - lastDetectTime.current) >= 0.5) {
             lastDetectTime.current = now;
             setIsDetecting(true);
 
@@ -111,12 +126,12 @@ export default function Home() {
                                     // DAMPED PREDICTION: We reduce the prediction weight (0.4) 
                                     // to prevent the box from "overshooting" when objects stop suddenly.
                                     const DAMPING = 0.4;
-                                    predictedBox = t.bbox.map((val, i) => val + (velocity[i] * latency * DAMPING));
+                                    predictedBox = t.bbox.map((val, i) => val + (velocity[i] * latency * DAMPING)) as [number, number, number, number];
                                 }
                             }
 
                             trackStates.current.set(t.track_id, { lastBox: t.bbox, lastTime: now });
-                            return { ...t, bbox: predictedBox };
+                            return { ...t, bbox: predictedBox as [number, number, number, number] };
                         });
 
                         setBboxes(updatedTracks);
@@ -148,8 +163,7 @@ export default function Home() {
         if (!query.trim()) return;
         setLoading(true);
         try {
-            // FIXED: Slider value now matches image preview percentage 1-to-1
-            const data = await searchImages(query, resultCount, minSimilarity);
+            const data = await searchImages(query, resultCount, minSimilarity, deepSearch);
             setResults(data);
             setHasSearched(true);
         } catch (error) {
@@ -245,9 +259,14 @@ export default function Home() {
                                 <button
                                     type="submit"
                                     disabled={loading || !backendReady}
-                                    className="mr-2 px-6 py-2.5 bg-white text-black font-bold rounded-xl hover:bg-gray-200 transition-all active:scale-95 disabled:opacity-50"
+                                    className="mr-2 px-6 py-2.5 bg-white text-black font-bold rounded-xl hover:bg-gray-200 transition-all active:scale-95 disabled:opacity-50 whitespace-nowrap"
                                 >
-                                    {loading ? <Loader2 className="animate-spin w-5 h-5" /> : "Search"}
+                                    {loading
+                                        ? deepSearch
+                                            ? <span className="flex items-center gap-2"><Loader2 className="animate-spin w-4 h-4" />Deep Analyzing…</span>
+                                            : <Loader2 className="animate-spin w-5 h-5" />
+                                        : "Search"
+                                    }
                                 </button>
                             </div>
                         </form>
@@ -306,6 +325,32 @@ export default function Home() {
                                                 <span>Strict</span>
                                             </div>
                                         </div>
+                                        {/* Deep Search toggle — spans full width */}
+                                        <div className="col-span-2 flex items-start gap-3 pt-2 border-t border-white/5">
+                                            <button
+                                                id="deep-search-toggle"
+                                                type="button"
+                                                onClick={() => setDeepSearch(v => !v)}
+                                                className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 transition-colors duration-200 ${
+                                                    deepSearch ? 'bg-purple-500 border-purple-500' : 'bg-white/10 border-white/20'
+                                                }`}
+                                            >
+                                                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 ${
+                                                    deepSearch ? 'translate-x-4' : 'translate-x-0'
+                                                }`} />
+                                            </button>
+                                            <div>
+                                                <p className="text-xs text-white font-medium flex items-center gap-1.5">
+                                                    <Sparkles className="w-3 h-3 text-purple-400" />
+                                                    Deep Search
+                                                    <span className="text-[10px] bg-purple-500/20 text-purple-300 px-1.5 py-0.5 rounded-full border border-purple-500/30">~30s</span>
+                                                </p>
+                                                <p className="text-[10px] text-gray-500 mt-0.5">
+                                                    Uses Florence-2 to verify adjectives, actions &amp; object identity on top results.
+                                                    Results with a verified box are shown as ✦ AI Verified.
+                                                </p>
+                                            </div>
+                                        </div>
                                     </div>
                                 </motion.div>
                             )}
@@ -338,11 +383,23 @@ export default function Home() {
                                             </div>
                                         </div>
                                     )}
+                                    {/* AI Verified badge — top-left corner, always visible */}
+                                    {img.verified && (
+                                        <div className="absolute top-2 left-2 z-20">
+                                            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/90 text-black backdrop-blur-sm shadow-lg">
+                                                ✦ AI Verified
+                                            </span>
+                                        </div>
+                                    )}
                                     <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
                                         <div className="flex justify-between items-center mb-1.5">
                                             <p className="text-[10px] text-gray-400 font-mono truncate">{img.photo_id}</p>
                                             {img.score && (
-                                                <span className="text-[10px] bg-purple-500/30 border border-purple-500/30 px-1.5 py-0.5 rounded text-purple-300 font-medium">
+                                                <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium border ${
+                                                    img.verified
+                                                        ? 'bg-amber-500/30 border-amber-500/40 text-amber-300'
+                                                        : 'bg-purple-500/30 border-purple-500/30 text-purple-300'
+                                                }`}>
                                                     {Math.round(img.score * 100)}% Match
                                                 </span>
                                             )}
@@ -377,53 +434,95 @@ export default function Home() {
                             className="relative max-w-4xl max-h-[85vh] w-full flex flex-col items-center"
                             onClick={(e) => e.stopPropagation()}
                         >
-                            <div className="relative inline-flex items-center justify-center max-h-[70vh] rounded-2xl overflow-hidden shadow-2xl bg-black/50">
+                            {/* Image / Video container — boxes are absolute within this */}
+                            <div className="relative inline-flex items-start justify-center max-h-[70vh] rounded-2xl overflow-hidden shadow-2xl bg-black/50">
                                 {focusedImage.video_url ? (
-                                    <video
-                                        ref={videoRef}
-                                        src={focusedImage.video_url}
-                                        crossOrigin="anonymous"
-                                        controls
-                                        autoPlay
-                                        className="max-h-[70vh] w-auto"
-                                        onLoadedMetadata={(e) => {
-                                            if (focusedImage.timestamp) {
-                                                e.currentTarget.currentTime = focusedImage.timestamp;
-                                                lastDetectTime.current = focusedImage.timestamp;
-                                            }
-                                        }}
-                                        onTimeUpdate={handleTimeUpdate}
-                                    />
+                                    <div className="relative">
+                                        <video
+                                            ref={videoRef}
+                                            src={focusedImage.video_url}
+                                            crossOrigin="anonymous"
+                                            controls
+                                            autoPlay
+                                            className="max-h-[70vh] w-auto block"
+                                            onLoadedMetadata={(e) => {
+                                                if (focusedImage.timestamp) {
+                                                    e.currentTarget.currentTime = focusedImage.timestamp;
+                                                    lastDetectTime.current = focusedImage.timestamp;
+                                                }
+                                            }}
+                                            onTimeUpdate={handleTimeUpdate}
+                                        />
+                                        {bboxes.map((box) => (
+                                            <motion.div
+                                                key={box.track_id}
+                                                layout
+                                                transition={{ type: "tween", ease: "linear", duration: 0.15 }}
+                                                className="absolute border-[3px] pointer-events-none rounded"
+                                                style={{
+                                                    left: `${box.bbox[0] * 100}%`,
+                                                    top: `${box.bbox[1] * 100}%`,
+                                                    width: `${(box.bbox[2] - box.bbox[0]) * 100}%`,
+                                                    height: `${(box.bbox[3] - box.bbox[1]) * 100}%`,
+                                                    backgroundColor: `hsla(${(box.track_id * 60) % 360}, 80%, 55%, 0.1)`,
+                                                    boxShadow: `0 0 12px hsla(${(box.track_id * 60) % 360}, 80%, 55%, 0.5)`,
+                                                    borderColor: `hsl(${(box.track_id * 60) % 360}, 80%, 55%)`
+                                                }}
+                                            >
+                                                <span
+                                                    className="absolute -top-6 left-0 text-[10px] font-bold px-1.5 py-0.5 rounded whitespace-nowrap"
+                                                    style={{ color: `hsl(${(box.track_id * 60) % 360}, 80%, 55%)`, backgroundColor: "rgba(0,0,0,0.75)" }}
+                                                >
+                                                    {query}
+                                                </span>
+                                            </motion.div>
+                                        ))}
+                                    </div>
                                 ) : (
-                                    <img
-                                        src={focusedImage.photo_image_url}
-                                        alt={focusedImage.photo_id}
-                                        className="max-h-[70vh] w-auto"
-                                    />
+                                    /* inline-block sizes exactly to the image, making absolute bboxes accurate */
+                                    <div className="relative inline-block">
+                                        <img
+                                            src={focusedImage.photo_image_url}
+                                            alt={focusedImage.photo_id}
+                                            className="max-h-[70vh] w-auto block"
+                                        />
+                                        {bboxLoading && (
+                                            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                                                <div className="bg-black/60 rounded-full p-2">
+                                                    <svg className="animate-spin w-6 h-6 text-purple-400" fill="none" viewBox="0 0 24 24">
+                                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                                                    </svg>
+                                                </div>
+                                            </div>
+                                        )}
+                                        {bboxes.map((box) => (
+                                            <motion.div
+                                                key={box.track_id}
+                                                initial={{ opacity: 0 }}
+                                                animate={{ opacity: 1 }}
+                                                className="absolute border-[3px] pointer-events-none rounded"
+                                                style={{
+                                                    left: `${box.bbox[0] * 100}%`,
+                                                    top: `${box.bbox[1] * 100}%`,
+                                                    width: `${(box.bbox[2] - box.bbox[0]) * 100}%`,
+                                                    height: `${(box.bbox[3] - box.bbox[1]) * 100}%`,
+                                                    backgroundColor: `hsla(${(box.track_id * 60) % 360}, 80%, 55%, 0.1)`,
+                                                    boxShadow: `0 0 12px hsla(${(box.track_id * 60) % 360}, 80%, 55%, 0.5)`,
+                                                    borderColor: `hsl(${(box.track_id * 60) % 360}, 80%, 55%)`
+                                                }}
+                                            >
+                                                <span
+                                                    className="absolute -top-6 left-0 text-[10px] font-bold px-1.5 py-0.5 rounded whitespace-nowrap"
+                                                    style={{ color: `hsl(${(box.track_id * 60) % 360}, 80%, 55%)`, backgroundColor: "rgba(0,0,0,0.75)" }}
+                                                >
+                                                    {query}
+                                                </span>
+                                            </motion.div>
+                                        ))}
+                                    </div>
                                 )}
-                                {bboxes.map((box) => (
-                                    <motion.div
-                                        key={box.track_id}
-                                        layout
-                                        transition={{ type: "tween", ease: "linear", duration: 0.15 }}
-                                        className="absolute border-[3px] bg-red-500/10 pointer-events-none rounded sm:border-4 transition-all"
-                                        style={{
-                                            left: `${box.bbox[0] * 100}%`,
-                                            top: `${box.bbox[1] * 100}%`,
-                                            width: `${(box.bbox[2] - box.bbox[0]) * 100}%`,
-                                            height: `${(box.bbox[3] - box.bbox[1]) * 100}%`,
-                                            boxShadow: "0 0 15px rgba(239, 68, 68, 0.5)",
-                                            borderColor: `hsl(${(box.track_id * 60) % 360}, 80%, 55%)`
-                                        }}
-                                    >
-                                        <span 
-                                            className="absolute -top-6 left-0 text-[10px] font-bold px-1 rounded"
-                                            style={{ color: `hsl(${(box.track_id * 60) % 360}, 80%, 55%)`, backgroundColor: "rgba(0,0,0,0.7)" }}
-                                        >
-                                            #{box.track_id}
-                                        </span>
-                                    </motion.div>
-                                ))}
+
                             </div>
                             <div className="mt-4 w-full max-w-2xl text-center space-y-2 px-4">
                                 {currentDescription && (

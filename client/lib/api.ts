@@ -15,6 +15,8 @@ export interface SearchResult {
     timestamp?: number;
     description?: string;
     score?: number;
+    verified?: boolean;
+    florence_box?: [number, number, number, number] | null;
 }
 
 export interface DetectResult {
@@ -54,11 +56,16 @@ export async function waitForBackend(onAttempt?: (attempt: number) => void): Pro
     throw new Error('Backend did not respond after 90 seconds');
 }
 
-export async function searchImages(query: string, k: number = 20, threshold: number = 0.20): Promise<SearchResult[]> {
+export async function searchImages(
+    query: string,
+    k: number = 20,
+    threshold: number = 0.20,
+    deepSearch: boolean = false
+): Promise<SearchResult[]> {
     const res = await fetch(`${API_BASE}/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, k, threshold }),
+        body: JSON.stringify({ query, result_count: k, threshold, deep_search: deepSearch }),
     });
     if (!res.ok) throw new Error('Search failed');
     return res.json();

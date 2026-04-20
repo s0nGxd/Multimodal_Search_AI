@@ -11,8 +11,14 @@ router = APIRouter()
 
 class SearchRequest(BaseModel):
     query: str
-    k: Optional[int] = 20
-    threshold: Optional[float] = 0.20  # Min Similarity (0.0 - 1.0)
+    k: Optional[int] = None
+    result_count: Optional[int] = None   # frontend alias for k
+    threshold: Optional[float] = 0.20
+    deep_search: Optional[bool] = False
+
+    @property
+    def effective_k(self) -> int:
+        return self.k or self.result_count or 20
 
 class SearchResult(BaseModel):
     photo_id: str
@@ -21,6 +27,8 @@ class SearchResult(BaseModel):
     timestamp: Optional[float] = None
     description: Optional[str] = None
     score: float
+    verified: Optional[bool] = False
+    florence_box: Optional[List[float]] = None
 
 class DetectRequest(BaseModel):
     photo_image_url: str = ""
@@ -100,7 +108,12 @@ async def list_all_images():
 @router.post("/search", response_model=List[SearchResult])
 async def search_images(req: SearchRequest):
     try:
-        results = search_service.search(req.query, req.k, req.threshold)
+        results = search_service.search(
+            req.query,
+            req.effective_k,
+            req.threshold,
+            deep_search=req.deep_search or False
+        )
         response = []
         for r in results:
             score = float(r.get("similarity_score", 0.0))
@@ -108,7 +121,7 @@ async def search_images(req: SearchRequest):
             url = r["photo_image_url"]
             if url.startswith("/images/"):
                 url = f"{BACKEND_URL}{url}"
-                
+
             v_url = r.get("video_url", "")
             if v_url and isinstance(v_url, str) and v_url.startswith("/images/"):
                 v_url = f"{BACKEND_URL}{v_url}"
@@ -119,7 +132,9 @@ async def search_images(req: SearchRequest):
                 "video_url": v_url if v_url else None,
                 "timestamp": float(r.get("timestamp", 0.0)) if pd.notna(r.get("timestamp")) else None,
                 "description": r.get("description", ""),
-                "score": float(score)
+                "score": float(score),
+                "verified": bool(r.get("verified", False)),
+                "florence_box": r.get("florence_box", None),
             })
         return response
     except Exception as e:
@@ -143,6 +158,7 @@ async def track_object(req: TrackRequest):
         import io
         import os
         import base64
+        import asyncio
         from PIL import Image
         
         if req.base64_image:
@@ -166,12 +182,17 @@ async def track_object(req: TrackRequest):
         video_id = req.video_id or req.video_url or req.photo_image_url
         tracking_service.reset_for_new_video(video_id, req.query)
         
-        tracks = tracking_service.detect_and_track(img, req.query, return_all_detections=True)
+        # Run detection in a thread to avoid blocking the event loop
+        # (prevents video playback from freezing during GDINO inference)
+        tracks = await asyncio.to_thread(
+            tracking_service.detect_and_track, img, req.query, True
+        )
         
         return TrackResponse(tracks=tracks)
     except Exception as e:
         print(f"Tracking error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.post("/detect", response_model=DetectResponse)
 async def detect_object(req: DetectRequest):

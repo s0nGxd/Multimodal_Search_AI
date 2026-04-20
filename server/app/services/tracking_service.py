@@ -1,24 +1,42 @@
+import os
+import re
+import shutil
+import tempfile
 import torch
 import numpy as np
 from typing import List, Dict, Optional
 from PIL import Image
 
 try:
-    from norfair import Detection, Tracker
+    from sam2.build_sam import build_sam2_video_predictor
+    SAM2_AVAILABLE = True
 except ImportError:
-    Detection, Tracker = None, None
+    SAM2_AVAILABLE = False
+    print("Warning: SAM 2 is not installed. Falling back to frame-by-frame Grounding DINO for tracking.")
 
-def robust_hybrid_distance(detection: Detection, tracked_object) -> float:
-    try:
-        det = detection.points[0]
-        trk = tracked_object.estimate[0]
-        det_c = [(det[0] + det[2]) / 2, (det[1] + det[3]) / 2]
-        trk_c = [(trk[0] + trk[2]) / 2, (trk[1] + trk[3]) / 2]
-        dist = np.sqrt((det_c[0] - trk_c[0])**2 + (det_c[1] - trk_c[1])**2)
-        # Search radius: 600px is strict enough to prevent drifting but handles fast dogs
-        return min(1.0, dist / 600.0)
-    except:
-        return 1.0
+# ── Same modifier set used by search — keep in sync ──────────────────────
+_FILLER = {
+    'a', 'an', 'the', 'in', 'on', 'at', 'with', 'and', 'or', 'of', 'for',
+    'is', 'to', 'by', 'from', 'its', 'this', 'that',
+    'color', 'colour', 'colored', 'coloured', 'looking', 'like', 'type',
+    'kind', 'style', 'very', 'really', 'quite', 'pretty', 'beautiful',
+}
+
+
+def _clean_query_for_gdino(query: str) -> str:
+    """Simplify a user query into a phrase GDINO can understand.
+
+    'brown color dog running' → 'brown dog running'
+    'small black cat'         → 'small black cat' (unchanged, all useful)
+    'a photo of a large dog'  → 'large dog'
+
+    GDINO handles simple adjective-noun phrases well; it's the
+    filler words like 'color', 'type', 'looking' that confuse it.
+    """
+    words = query.strip().split()
+    cleaned = [w for w in words if w.lower().strip(".,!?") not in _FILLER]
+    return " ".join(cleaned) if cleaned else query.strip()
+
 
 class TrackingService:
     _instance = None
@@ -30,165 +48,173 @@ class TrackingService:
         return cls._instance
     
     def _initialize(self):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            self.device = "cuda"
+        elif torch.backends.mps.is_available():
+            self.device = "mps"
+        else:
+            self.device = "cpu"
+            
         from app.services.detection_service import detection_service
         self.detection_service = detection_service
         
-        self.tracker = Tracker(
-            distance_function=robust_hybrid_distance,
-            distance_threshold=0.85,
-            initialization_delay=0,
-            hit_counter_max=40,
-            past_detections_length=5
-        )
-        self.current_video_id: Optional[str] = None
-        self.current_query: Optional[str] = None
+        # We lazy load the predictor to avoid memory overhead unless tracking is requested.
+        self.predictor = None
+        self.sam2_checkpoint = os.getenv("SAM2_CHECKPOINT", None) # Optional local path
+        if not self.sam2_checkpoint and SAM2_AVAILABLE:
+            self.sam2_cfg = "sam2_hiera_s.yaml"
 
-    def _normalize_id(self, video_id: Optional[str]) -> Optional[str]:
-        if not video_id: return None
-        return video_id.split("/")[-1].split("?")[0]
-    
-    def reset_for_new_video(self, video_id: str, query: str = ""):
-        norm_id = self._normalize_id(video_id)
-        if self.current_video_id != norm_id or self.current_query != query:
-            self.tracker = Tracker(
-                distance_function=robust_hybrid_distance,
-                distance_threshold=0.85,
-                initialization_delay=0,
-                hit_counter_max=40,
-                past_detections_length=5
-            )
-            self.current_video_id = norm_id
-            self.current_query = query
-    
+    def _init_predictor(self):
+        if not SAM2_AVAILABLE:
+            return False
+            
+        if self.predictor is not None:
+            return True
+            
+        try:
+            from huggingface_hub import hf_hub_download
+            ckpt_path = hf_hub_download(repo_id="facebook/sam2-hiera-small", filename="sam2_hiera_small.pt")
+            self.predictor = build_sam2_video_predictor(self.sam2_cfg, ckpt_path, device=self.device)
+            return True
+        except Exception as e:
+            print(f"Failed to load SAM 2 Predictor: {e}")
+            return False
+
     def detect_and_track(self, frame: Image.Image, query: str, return_all_detections: bool = False) -> List[Dict]:
-        width, height = frame.size
+        """Single-frame detection. Returns all matching objects when return_all_detections=True.
         
-        # Check if this is a fresh session (no active tracks)
-        is_fresh_session = len(self.tracker.tracked_objects) == 0
+        Cleans the query to strip filler words like 'color', 'type', etc.
+        that confuse Grounding DINO.  verify=False for real-time performance.
+        """
+        clean_q = _clean_query_for_gdino(query)
         
-        # 1. Detection with Low Threshold (0.10) to catch background objects
-        detections_raw = self._detect_multiple(frame, query, threshold=0.10)
-        
-        norfair_detections = []
-        for det in detections_raw:
-            box = det["box"]
-            points = np.array([[box[0]*width, box[1]*height, box[2]*width, box[3]*height]], dtype=np.float32)
-            norfair_detections.append(Detection(points=points, scores=np.array([det["score"]])))
-        
-        try:
-            tracked_objects = self.tracker.update(detections=norfair_detections)
-            results = []
-            
-            # Find active track IDs before this update
-            active_ids = [obj.id for obj in self.tracker.tracked_objects if obj.hit_counter > 0]
-
-            for obj in tracked_objects:
-                if obj.last_detection is None: continue
-                
-                score = float(obj.last_detection.scores[0])
-                
-                # HYSTERESIS + INITIAL SENSITIVITY:
-                # - If it's a fresh session (Static Image), use Low Discovery (0.12)
-                # - If it's a new object in a running video, use High Discovery (0.25)
-                # - If it's an existing object, use Lock Threshold (0.10)
-                if is_fresh_session:
-                    discovery_threshold = 0.12
-                else:
-                    discovery_threshold = 0.25 if obj.id not in active_ids else 0.10
-
-                if score < discovery_threshold:
-                    continue
-
-                est = obj.estimate[0]
-                normalized_box = [
-                    float(np.clip(est[0]/width, 0, 1)), float(np.clip(est[1]/height, 0, 1)),
-                    float(np.clip(est[2]/width, 0, 1)), float(np.clip(est[3]/height, 0, 1))
-                ]
-                
-                results.append({"track_id": obj.id, "bbox": normalized_box, "score": score})
-            return results
-        except Exception:
-            return []
-    
-    def _detect_multiple(self, frame: Image.Image, query: str, max_detections: int = 5, threshold: float = 0.15) -> List[Dict]:
-        width, height = frame.size
-        # Improved prompts to catch diverse objects like snakes or background mountains
-        texts = [[f"a photo of a {query}", f"{query}", f"the {query} in the background"]]
-        try:
-            processor = self.detection_service.processor
-            model = self.detection_service.model
-            inputs = processor(text=texts, images=frame, return_tensors="pt").to(self.device)
-            with torch.no_grad():
-                outputs = model(**inputs)
-            
-            target_sizes = torch.tensor([[height, width]]).to(self.device)
-            results = processor.image_processor.post_process_object_detection(
-                outputs=outputs, target_sizes=target_sizes, threshold=threshold
+        if return_all_detections:
+            detections = self.detection_service.detect_multiple(
+                frame, clean_q, threshold=0.20, verify=False
             )
-            
-            i = 0
-            boxes, scores = results[i]["boxes"], results[i]["scores"]
-            if len(scores) == 0: return []
-            
-            # --- SUPER AGGRESSIVE NMS ---
-            # Lowering threshold to 0.15 to merge boxes that even slightly overlap
-            from torchvision.ops import nms
-            keep = nms(boxes, scores, iou_threshold=0.15)
-            
-            boxes = boxes[keep][:max_detections]
-            scores = scores[keep][:max_detections]
-            
-            final_indices = []
-            boxes_list = boxes.tolist()
-            
-            # --- CONTAINMENT FILTER (Anti-Nested Boxes) ---
-            # We check every box against every other box.
-            # If box A is mostly inside box B, discard the lower-scoring one.
-            for i in range(len(boxes_list)):
-                is_contained = False
-                a = boxes_list[i]
-                area_a = (a[2] - a[0]) * (a[3] - a[1])
-                
-                for j in range(len(boxes_list)):
-                    if i == j: continue
-                    b = boxes_list[j]
-                    
-                    # Calculate intersection
-                    ixmin = max(a[0], b[0]); iymin = max(a[1], b[1])
-                    ixmax = min(a[2], b[2]); iymax = min(a[3], b[3])
-                    iw = max(0, ixmax - ixmin); ih = max(0, iymax - iymin)
-                    inter_area = iw * ih
-                    
-                    # Intersection over Smallest Area (Containment Ratio)
-                    # If 80% of box A is inside box B, it's redundant.
-                    if area_a > 0 and (inter_area / area_a) > 0.80:
-                        # Only discard if j has a higher score
-                        if scores[j] >= scores[i]:
-                            is_contained = True
-                            break
-                
-                if not is_contained:
-                    final_indices.append(i)
+            return [
+                {"track_id": i + 1, "bbox": d["box"], "score": d["score"]}
+                for i, d in enumerate(detections)
+            ]
+        result = self.detection_service.detect(frame, clean_q, verify=False)
+        if result and result["score"] >= 0.15:
+            return [{"track_id": 1, "bbox": result["box"], "score": result["score"]}]
+        return []
 
-            detections = []
-            for idx in final_indices:
-                box = boxes_list[idx]
-                norm_box = [box[0]/width, box[1]/height, box[2]/width, box[3]/height]
-                
-                # Filter tiny noise
-                w = norm_box[2] - norm_box[0]
-                if w < 0.02: continue
-
-                detections.append({
-                    "box": norm_box,
-                    "score": scores[idx].item()
-                })
-            return detections
-        except Exception:
-            return []
+    def reset_for_new_video(self, video_id: str, query: str):
+        """No-op for the new architecture as SAM2 is stateless across API calls."""
+        pass
 
     def process_video_frames(self, frames: List[Image.Image], query: str) -> List[List[Dict]]:
-        return [self.detect_and_track(f, query) for f in frames]
+        """Processes the entire video. Uses SAM 2 by default with Grounding DINO fallback."""
+        clean_q = _clean_query_for_gdino(query)
+        
+        has_sam2 = self._init_predictor()
+        
+        # FALLBACK MODE: Frame-by-frame Grounding DINO
+        if not has_sam2:
+            print("Running in Grounding DINO fallback mode (SAM 2 unavailable).")
+            results = []
+            for frame in frames:
+                det = self.detection_service.detect(frame, clean_q, verify=False)
+                if det and det["score"] > 0.15:
+                    results.append([{"track_id": 1, "bbox": det["box"], "score": det["score"]}])
+                else:
+                    results.append([])
+            return results
+            
+        # SAM 2 MODE
+        tmpdir = tempfile.mkdtemp()
+        try:
+            for i, frame in enumerate(frames):
+                frame_path = os.path.join(tmpdir, f"{i:05d}.jpg")
+                frame.convert("RGB").save(frame_path)
+                
+            inference_state = self.predictor.init_state(video_path=tmpdir)
+            
+            first_box_det = self.detection_service.detect(frames[0], clean_q, verify=False)
+            results = [[] for _ in range(len(frames))]
+            
+            if not first_box_det:
+                current_frame_idx = 0
+                obj_found = False
+                for i in range(1, len(frames)):
+                    det = self.detection_service.detect(frames[i], clean_q, verify=False)
+                    if det and det["score"] > 0.15:
+                        first_box_det = det
+                        current_frame_idx = i
+                        obj_found = True
+                        break
+                if not obj_found:
+                    return results
+            else:
+                current_frame_idx = 0
+                
+            width, height = frames[0].size
+            active_obj_id = 1
+            
+            def to_absolute(norm_box):
+                return np.array([
+                    norm_box[0] * width,
+                    norm_box[1] * height,
+                    norm_box[2] * width,
+                    norm_box[3] * height
+                ], dtype=np.float32)
+                
+            def mask_to_box(mask_np):
+                if mask_np.sum() == 0:
+                    return None
+                y_indices, x_indices = np.where(mask_np > 0)
+                if len(y_indices) == 0:
+                    return None
+                x_min, x_max = np.min(x_indices), np.max(x_indices)
+                y_min, y_max = np.min(y_indices), np.max(y_indices)
+                return [
+                    float(x_min) / width, float(y_min) / height, 
+                    float(x_max) / width, float(y_max) / height
+                ]
+
+            abs_box = to_absolute(first_box_det["box"])
+            self.predictor.add_new_points_or_box(
+                inference_state=inference_state,
+                frame_idx=current_frame_idx,
+                obj_id=active_obj_id,
+                box=abs_box
+            )
+            
+            latest_bbox = first_box_det["box"]
+            results[current_frame_idx].append({"track_id": active_obj_id, "bbox": latest_bbox, "score": 1.0})
+            
+            for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(inference_state, start_frame_idx=current_frame_idx):
+                if out_frame_idx == current_frame_idx:
+                    continue
+                
+                if active_obj_id in out_obj_ids:
+                    idx = out_obj_ids.index(active_obj_id)
+                    mask = (out_mask_logits[idx] > 0.0).cpu().numpy().squeeze()
+                    bbox = mask_to_box(mask)
+                    
+                    if bbox is not None:
+                        results[out_frame_idx].append({"track_id": active_obj_id, "bbox": bbox, "score": 1.0})
+                        latest_bbox = bbox
+                    else:
+                        re_det = self.detection_service.detect(frames[out_frame_idx], clean_q, verify=False)
+                        if re_det and re_det["score"] > 0.15:
+                            active_obj_id += 1
+                            abs_box_re = to_absolute(re_det["box"])
+                            self.predictor.add_new_points_or_box(
+                                inference_state=inference_state,
+                                frame_idx=out_frame_idx,
+                                obj_id=active_obj_id,
+                                box=abs_box_re
+                            )
+                            results[out_frame_idx].append({"track_id": active_obj_id, "bbox": re_det["box"], "score": 1.0})
+                            
+        except Exception as e:
+            print(f"Tracking error: {e}")
+        finally:
+            shutil.rmtree(tmpdir)
+            
+        return results
 
 tracking_service = TrackingService()
