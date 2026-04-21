@@ -34,7 +34,7 @@ class CaptionService:
             return
         from transformers import AutoProcessor, AutoModelForCausalLM
 
-        self.model_name = "microsoft/Florence-2-large"
+        self.model_name = "microsoft/Florence-2-base"
 
         if torch.cuda.is_available():
             self.device = "cuda"

@@ -163,3 +163,30 @@ export async function trackObject(
     if (!res.ok) throw new Error('Tracking failed');
     return res.json();
 }
+
+// ── Video preload tracking ──────────────────────────────────────────────
+// Pre-computes bounding boxes for every second of a video so the frontend
+// can interpolate between keyframes for smooth, lag-free tracking.
+
+export interface PreloadKeyframe {
+    time: number;
+    tracks: TrackResult[];
+}
+
+export interface PreloadResponse {
+    keyframes: PreloadKeyframe[];
+    duration: number;
+}
+
+export async function preloadVideoTracks(
+    video_url: string,
+    query: string
+): Promise<PreloadResponse> {
+    const res = await fetch(`${API_BASE}/track/preload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ video_url, query })
+    });
+    if (!res.ok) throw new Error('Video preload failed');
+    return res.json();
+}

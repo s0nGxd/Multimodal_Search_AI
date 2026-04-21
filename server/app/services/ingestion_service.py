@@ -18,8 +18,8 @@ from .persistence_service import sync_to_repo
 
 load_dotenv()
 
-# SigLIP So400M uses 1152 dimension
-EMBED_DIM = int(os.getenv("EMBED_DIM", "1152"))
+# SigLIP Base uses 768 dimension
+EMBED_DIM = int(os.getenv("EMBED_DIM", "768"))
 
 class ImageRecord(LanceModel):
     photo_id: str

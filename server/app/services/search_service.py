@@ -72,7 +72,9 @@ class SearchService:
     def _initialize(self):
         print("Initializing SearchService...")
         self.db_uri = os.getenv("LANCEDB_URI", "./lancedb_db")
-        self.model_name = os.getenv("EMBED_MODEL", "google/siglip-so400m-patch14-384")
+        # SigLIP Base uses 768 dimension
+        self.embed_dim = int(os.getenv("EMBED_DIM", "768"))
+        self.model_name = os.getenv("EMBED_MODEL", "google/siglip-base-patch16-224")
 
         if torch.cuda.is_available():
             self.device = "cuda"
@@ -307,15 +309,19 @@ class SearchService:
                                  for n in nouns):
                     noun_score = 0.85
 
-            # Visual rank tiebreaker (tiny, just for ordering within same tier)
-            rank_bonus = max(0.0, 0.05 * (1.0 - rank_pos / max(total, 1)))
+            # Visual Similarity from SigLIP (1.0 - distance)
+            # Typically ranges from 0.15 to 0.35, but can be higher.
+            visual_sim = max(0.0, 1.0 - float(row.get("_distance", 1.0)))
 
             if noun_score > 0:
                 # CONFIRMED: core noun is in description
-                combined = noun_score + adj_bonus + rank_bonus
+                # Base score 0.80 + Adjective bonus (up to 0.07) + Visual similarity (up to ~0.15)
+                # This guarantees confirmed items pass the 0.80 threshold, but provides wide
+                # score variation based on actual visual match (e.g., "black dog" vs "dog" color match)
+                combined = 0.80 + adj_bonus + (visual_sim * 0.5)
             else:
-                # NOT CONFIRMED: low score, will be filtered by threshold
-                combined = 0.05 + rank_bonus
+                # NOT CONFIRMED: Rank by visual similarity alone, suppressed by 0.50 threshold penalty
+                combined = visual_sim * 0.5
 
             best_row[pid]["_noun_score"] = noun_score
             best_row[pid]["_combined_score"] = min(0.99, combined)

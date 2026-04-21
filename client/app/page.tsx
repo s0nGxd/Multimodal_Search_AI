@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search, Image as ImageIcon, Sparkles, Loader2, ArrowRight, Play } from "lucide-react";
 import Link from "next/link";
-import { searchImages, SearchResult, getVideoFrames, VideoFrame, trackObject, TrackResult, checkBackendHealth, waitForBackend } from "@/lib/api";
+import { searchImages, SearchResult, getVideoFrames, VideoFrame, trackObject, TrackResult, preloadVideoTracks, PreloadKeyframe, checkBackendHealth, waitForBackend } from "@/lib/api";
 
 export default function Home() {
     const [query, setQuery] = useState("");
@@ -19,10 +19,12 @@ export default function Home() {
     const [bboxes, setBboxes] = useState<TrackResult[]>([]);
     const [bboxLoading, setBboxLoading] = useState(false);
     const videoRef = useRef<HTMLVideoElement>(null);
-    const lastDetectTime = useRef<number>(0);
-    const [isDetecting, setIsDetecting] = useState(false);
     const [videoFrames, setVideoFrames] = useState<VideoFrame[]>([]);
     const [currentDescription, setCurrentDescription] = useState("");
+
+    // --- Video preload tracking state ---
+    const [videoPreloading, setVideoPreloading] = useState(false);
+    const preloadedKeyframes = useRef<PreloadKeyframe[]>([]);
 
     // --- Backend Readiness State ---
     const [backendReady, setBackendReady] = useState<boolean | null>(null);
@@ -42,110 +44,115 @@ export default function Home() {
         return () => { cancelled = true; };
     }, []);
 
-    const trackStates = useRef<Map<number, { lastBox: number[], lastTime: number }>>(new Map());
-
+    // ── When user clicks an image/video result ──────────────────────────
     useEffect(() => {
         if (focusedImage) {
             setBboxes([]);
-            trackStates.current.clear();
+            preloadedKeyframes.current = [];
             setCurrentDescription(focusedImage.description || "");
 
             if (focusedImage.video_url) {
+                // Fetch frame descriptions for the timeline
                 getVideoFrames(focusedImage.video_url).then(setVideoFrames).catch(console.error);
-            } else {
-                setVideoFrames([]);
-            }
 
-            if (query && hasSearched && !focusedImage.video_url) {
-                lastDetectTime.current = 0;
-
-                // If Deep Search already ran, the Florence-2 box is pre-computed — use it instantly
-                if (focusedImage.florence_box) {
-                    const [x1, y1, x2, y2] = focusedImage.florence_box;
-                    setBboxes([{ track_id: 0, bbox: [x1, y1, x2, y2], score: focusedImage.score ?? 1 }]);
-                } else {
-                    // Fallback: run Grounding DINO live
-                    setBboxLoading(true);
-                    trackObject(focusedImage.photo_image_url, query, undefined, focusedImage.photo_image_url)
+                // ── PRELOAD tracking: run GDINO on all keyframes upfront ──
+                if (query && hasSearched) {
+                    setVideoPreloading(true);
+                    preloadVideoTracks(focusedImage.video_url, query)
                         .then(res => {
-                            setBboxes(res.tracks || []);
-                            setBboxLoading(false);
+                            preloadedKeyframes.current = res.keyframes;
+                            setVideoPreloading(false);
+                            console.log(`[Preload] Received ${res.keyframes.length} keyframes for ${res.duration}s video`);
+
+                            // Show initial bbox from first keyframe that has detections
+                            const firstHit = res.keyframes.find(kf => kf.tracks.length > 0);
+                            if (firstHit) {
+                                setBboxes(firstHit.tracks);
+                            }
                         })
                         .catch(err => {
-                            console.error(err);
-                            setBboxLoading(false);
+                            console.error("Video preload failed:", err);
+                            setVideoPreloading(false);
                         });
+                }
+            } else {
+                setVideoFrames([]);
+
+                // Image bbox detection (unchanged)
+                if (query && hasSearched) {
+                    if (focusedImage.florence_box) {
+                        const [x1, y1, x2, y2] = focusedImage.florence_box;
+                        setBboxes([{ track_id: 0, bbox: [x1, y1, x2, y2], score: focusedImage.score ?? 1 }]);
+                    } else {
+                        setBboxLoading(true);
+                        trackObject(focusedImage.photo_image_url, query, undefined, focusedImage.photo_image_url)
+                            .then(res => {
+                                setBboxes(res.tracks || []);
+                                setBboxLoading(false);
+                            })
+                            .catch(err => {
+                                console.error(err);
+                                setBboxLoading(false);
+                            });
+                    }
                 }
             }
         }
     }, [focusedImage]);
 
-    const handleTimeUpdate = async () => {
+    // ── Video time update: interpolate between preloaded keyframes ───────
+    // No network calls! Pure client-side interpolation for smooth tracking.
+    const handleTimeUpdate = () => {
         const video = videoRef.current;
-        if (!video || !query || !focusedImage) return;
+        if (!video || !focusedImage) return;
 
         const now = video.currentTime;
+        const kfs = preloadedKeyframes.current;
 
-        if (!isDetecting && Math.abs(now - lastDetectTime.current) >= 0.5) {
-            lastDetectTime.current = now;
-            setIsDetecting(true);
+        // ── Interpolate bounding boxes from preloaded keyframes ──────
+        if (kfs.length > 0) {
+            // Binary search for the surrounding keyframes
+            let lo = 0, hi = kfs.length - 1;
+            while (lo < hi - 1) {
+                const mid = Math.floor((lo + hi) / 2);
+                if (kfs[mid].time <= now) lo = mid;
+                else hi = mid;
+            }
 
-            try {
-                const canvas = document.createElement("canvas");
-                const MAX_WIDTH = 480; 
-                const scale = Math.min(1.0, MAX_WIDTH / video.videoWidth);
-                canvas.width = video.videoWidth * scale;
-                canvas.height = video.videoHeight * scale;
-                
-                const ctx = canvas.getContext("2d");
-                if (ctx && canvas.width > 0) {
-                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                    const base64Image = canvas.toDataURL("image/jpeg", 0.3);
-                    
-                    const requestStartTime = now;
-                    const result = await trackObject(
-                        focusedImage.photo_image_url,
-                        query,
-                        focusedImage.video_url,
-                        focusedImage.video_url,
-                        base64Image
-                    );
-                    
-                    if (result && result.tracks) {
-                        const latency = video.currentTime - requestStartTime;
-                        
-                        const updatedTracks = result.tracks.map((t: TrackResult) => {
-                            const prev = trackStates.current.get(t.track_id);
-                            let predictedBox = [...t.bbox];
+            const prev = kfs[lo];
+            const next = kfs[hi];
 
-                            if (prev) {
-                                const dt = now - prev.lastTime;
-                                if (dt > 0 && dt < 1.0) {
-                                    const velocity = t.bbox.map((val, i) => (val - prev.lastBox[i]) / dt);
-                                    
-                                    // DAMPED PREDICTION: We reduce the prediction weight (0.4) 
-                                    // to prevent the box from "overshooting" when objects stop suddenly.
-                                    const DAMPING = 0.4;
-                                    predictedBox = t.bbox.map((val, i) => val + (velocity[i] * latency * DAMPING)) as [number, number, number, number];
-                                }
-                            }
+            if (prev.tracks.length > 0 && next.tracks.length > 0 && prev.time !== next.time) {
+                // Interpolation factor (0..1 between prev and next keyframe)
+                const t = Math.max(0, Math.min(1, (now - prev.time) / (next.time - prev.time)));
 
-                            trackStates.current.set(t.track_id, { lastBox: t.bbox, lastTime: now });
-                            return { ...t, bbox: predictedBox as [number, number, number, number] };
-                        });
+                const interpolated: TrackResult[] = prev.tracks.map((prevTrack, i) => {
+                    // Find matching track in next keyframe by track_id
+                    const nextTrack = next.tracks.find(nt => nt.track_id === prevTrack.track_id)
+                        || next.tracks[i]
+                        || prevTrack;
 
-                        setBboxes(updatedTracks);
-                    } else {
-                        setBboxes([]);
-                    }
-                }
-            } catch (err) {
-                console.error("Tracking update failed:", err);
-            } finally {
-                setIsDetecting(false);
+                    const bbox: [number, number, number, number] = [
+                        prevTrack.bbox[0] + (nextTrack.bbox[0] - prevTrack.bbox[0]) * t,
+                        prevTrack.bbox[1] + (nextTrack.bbox[1] - prevTrack.bbox[1]) * t,
+                        prevTrack.bbox[2] + (nextTrack.bbox[2] - prevTrack.bbox[2]) * t,
+                        prevTrack.bbox[3] + (nextTrack.bbox[3] - prevTrack.bbox[3]) * t,
+                    ];
+
+                    return { ...prevTrack, bbox };
+                });
+
+                setBboxes(interpolated);
+            } else if (prev.tracks.length > 0) {
+                setBboxes(prev.tracks);
+            } else if (next.tracks.length > 0) {
+                setBboxes(next.tracks);
+            } else {
+                setBboxes([]);
             }
         }
 
+        // ── Update frame description ─────────────────────────────────
         if (videoFrames.length > 0) {
             let closest = videoFrames[0];
             for (const f of videoFrames) {
@@ -448,11 +455,22 @@ export default function Home() {
                                             onLoadedMetadata={(e) => {
                                                 if (focusedImage.timestamp) {
                                                     e.currentTarget.currentTime = focusedImage.timestamp;
-                                                    lastDetectTime.current = focusedImage.timestamp;
                                                 }
                                             }}
                                             onTimeUpdate={handleTimeUpdate}
                                         />
+                                        {/* Preloading overlay */}
+                                        {videoPreloading && (
+                                            <div className="absolute inset-0 flex items-center justify-center bg-black/60 z-20 rounded-2xl">
+                                                <div className="flex flex-col items-center gap-3">
+                                                    <svg className="animate-spin w-8 h-8 text-purple-400" fill="none" viewBox="0 0 24 24">
+                                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                                                    </svg>
+                                                    <span className="text-sm text-white/80 font-medium">Preloading object tracking...</span>
+                                                </div>
+                                            </div>
+                                        )}
                                         {bboxes.map((box) => (
                                             <motion.div
                                                 key={box.track_id}

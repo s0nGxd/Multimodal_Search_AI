@@ -183,7 +183,6 @@ async def track_object(req: TrackRequest):
         tracking_service.reset_for_new_video(video_id, req.query)
         
         # Run detection in a thread to avoid blocking the event loop
-        # (prevents video playback from freezing during GDINO inference)
         tracks = await asyncio.to_thread(
             tracking_service.detect_and_track, img, req.query, True
         )
@@ -191,6 +190,57 @@ async def track_object(req: TrackRequest):
         return TrackResponse(tracks=tracks)
     except Exception as e:
         print(f"Tracking error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Video preload endpoint ───────────────────────────────────────────────
+# Extracts keyframes from a video, runs GDINO on each, returns a full
+# timeline of bounding boxes.  The frontend caches these and interpolates
+# between them during playback — no per-frame API calls needed.
+
+class PreloadRequest(BaseModel):
+    video_url: str
+    query: str
+
+class PreloadKeyframe(BaseModel):
+    time: float
+    tracks: List[Dict] = []
+
+class PreloadResponse(BaseModel):
+    keyframes: List[PreloadKeyframe] = []
+    duration: float = 0.0
+
+@router.post("/track/preload", response_model=PreloadResponse)
+async def preload_video_tracks(req: PreloadRequest):
+    import asyncio
+    try:
+        from app.services.tracking_service import tracking_service
+
+        # Resolve video URL to local file path
+        url = req.video_url
+        if "/images/" in url:
+            file_name = url.split("/images/")[-1]
+            local_path = os.path.join("data", file_name)
+        else:
+            raise HTTPException(status_code=400, detail="Only local videos supported")
+
+        if not os.path.exists(local_path):
+            raise HTTPException(status_code=404, detail=f"Video not found: {local_path}")
+
+        # Run the heavy GDINO work in a thread
+        result = await asyncio.to_thread(
+            tracking_service.preload_video_tracks,
+            local_path, req.query
+        )
+
+        return PreloadResponse(
+            keyframes=result["keyframes"],
+            duration=result["duration"]
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Preload error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
