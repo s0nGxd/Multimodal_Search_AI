@@ -44,6 +44,18 @@ export default function Home() {
         return () => { cancelled = true; };
     }, []);
 
+    useEffect(() => {
+        const video = videoRef.current;
+        if (video) {
+            // Pause while preloading, play once preloaded
+            if (videoPreloading) {
+                video.pause();
+            } else if (focusedImage?.video_url) {
+                video.play().catch(e => console.log("Playback prevented:", e));
+            }
+        }
+    }, [videoPreloading, focusedImage]);
+
     // ── When user clicks an image/video result ──────────────────────────
     useEffect(() => {
         if (focusedImage) {
@@ -450,7 +462,6 @@ export default function Home() {
                                             src={focusedImage.video_url}
                                             crossOrigin="anonymous"
                                             controls
-                                            autoPlay
                                             className="max-h-[70vh] w-auto block"
                                             onLoadedMetadata={(e) => {
                                                 if (focusedImage.timestamp) {

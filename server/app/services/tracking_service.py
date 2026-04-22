@@ -153,15 +153,71 @@ class TrackingService:
 
         # ── Run GDINO on each keyframe ────────────────────────────────
         keyframes = []
+        next_track_id = 1
+        active_tracks = [] # list of obj: {"track_id": 1, "bbox": [..]}
+
         for timestamp, pil_frame in frames:
             detections = self.detection_service.detect_multiple(
-                pil_frame, clean_q, threshold=0.25, verify=False
+                pil_frame, clean_q, threshold=0.35, verify=False
             )
-            tracks = [
-                {"track_id": i + 1, "bbox": d["box"], "score": d["score"]}
-                for i, d in enumerate(detections)
-            ]
-            keyframes.append({"time": round(timestamp, 3), "tracks": tracks})
+            
+            # Limit to top 3 detections per frame to prevent noise
+            detections = detections[:3]
+            
+            # Simple IoU tracker
+            current_tracks = []
+            
+            # 1. Try to match each previous track to a new detection
+            matched_det_indices = set()
+            for prev_t in active_tracks:
+                best_iou = 0.20 # IoU Threshold
+                best_det_idx = -1
+                
+                for i, det in enumerate(detections):
+                    if i in matched_det_indices:
+                        continue
+                    
+                    # Calculate IoU
+                    boxA = prev_t["bbox"]
+                    boxB = det["box"]
+                    xA = max(boxA[0], boxB[0])
+                    yA = max(boxA[1], boxB[1])
+                    xB = min(boxA[2], boxB[2])
+                    yB = min(boxA[3], boxB[3])
+
+                    interArea = max(0, xB - xA) * max(0, yB - yA)
+                    if interArea > 0:
+                        boxAArea = max(0, boxA[2] - boxA[0]) * max(0, boxA[3] - boxA[1])
+                        boxBArea = max(0, boxB[2] - boxB[0]) * max(0, boxB[3] - boxB[1])
+                        iou = interArea / float(boxAArea + boxBArea - interArea + 1e-6)
+                    else:
+                        iou = 0.0
+
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_det_idx = i
+                        
+                if best_det_idx != -1:
+                    matched_det_indices.add(best_det_idx)
+                    current_tracks.append({
+                        "track_id": prev_t["track_id"],
+                        "bbox": detections[best_det_idx]["box"],
+                        "score": detections[best_det_idx]["score"]
+                    })
+                    
+            # 2. Assign new track IDs ONLY for high-confidence unmatched detections
+            # This prevents random weak detections from spawning new tracks
+            for i, det in enumerate(detections):
+                if i not in matched_det_indices and det["score"] >= 0.40:
+                    current_tracks.append({
+                        "track_id": next_track_id,
+                        "bbox": det["box"],
+                        "score": det["score"]
+                    })
+                    next_track_id += 1
+            
+            active_tracks = current_tracks
+            keyframes.append({"time": round(timestamp, 3), "tracks": current_tracks})
 
         elapsed = time.time() - t0
         detected_count = sum(1 for kf in keyframes if kf["tracks"])
@@ -169,6 +225,5 @@ class TrackingService:
               f"{detected_count}/{len(keyframes)} keyframes have detections")
 
         return {"keyframes": keyframes, "duration": round(duration, 3)}
-
 
 tracking_service = TrackingService()

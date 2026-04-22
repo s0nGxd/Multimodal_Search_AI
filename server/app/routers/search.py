@@ -76,6 +76,9 @@ async def list_all_images():
             if search_service.table is None:
                 return []
         df = search_service.table.to_pandas()
+        # Filter out region records — only show global frames and standalone images
+        if "is_region" in df.columns:
+            df = df[df["is_region"] == False]
         results = []
         seen_videos = set()
         for _, row in df.iterrows():

@@ -164,5 +164,72 @@ class CaptionService:
 
         return {"found": True, "score": best_score, "box": best_box}
 
+    @torch.no_grad()
+    def dense_region_caption(self, image: Image.Image) -> dict:
+        """Finds all distinct objects in an image and generates a specific caption for each.
+        Returns:
+            dict: {"bboxes": [[x1,y1,x2,y2], ...], "labels": ["a brown dog", ...]}
+        """
+        self._ensure_loaded()
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+
+        task = "<OD>"
+        try:
+            result = self._run_task(image, task, max_new_tokens=512, num_beams=3)
+            return result.get(task, {"bboxes": [], "labels": []})
+        except Exception as e:
+            print(f"Florence-2 dense region error: {e}")
+            return {"bboxes": [], "labels": []}
+
+    @torch.no_grad()
+    def region_to_description(self, image: Image.Image, box: list) -> str:
+        """Generates a detailed caption for a specific region within the FULL image context.
+        Box format: [x1, y1, x2, y2] in absolute pixel coordinates.
+        """
+        self._ensure_loaded()
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+
+        # Florence-2 coordinates are normalized to 0-1000
+        w, h = image.size
+        # Ensure box coordinates are within image boundaries
+        x1 = max(0, min(w, box[0]))
+        y1 = max(0, min(h, box[1]))
+        x2 = max(0, min(w, box[2]))
+        y2 = max(0, min(h, box[3]))
+        
+        # Normalize to 0-1000 range
+        n_x1 = int((x1 / w) * 1000)
+        n_y1 = int((y1 / h) * 1000)
+        n_x2 = int((x2 / w) * 1000)
+        n_y2 = int((y2 / h) * 1000)
+
+        task = "<REGION_TO_DESCRIPTION>"
+        # Format the coordinates as <loc_N> tags
+        loc_str = f"<loc_{n_x1}><loc_{n_y1}><loc_{n_x2}><loc_{n_y2}>"
+        task_prompt = f"{task}{loc_str}"
+        
+        try:
+            result = self._run_task(image, task, text_input=task_prompt, max_new_tokens=256, num_beams=3)
+            return str(result.get(task, "")).strip()
+        except Exception as e:
+            print(f"Region to description error: {e}")
+            return ""
+
+    @torch.no_grad()
+    def generate_crop_caption(self, crop: Image.Image) -> str:
+        """Generates a detailed caption for a tightly cropped object to solve adjective mapping."""
+        self._ensure_loaded()
+        if crop.mode != "RGB":
+            crop = crop.convert("RGB")
+            
+        task = "<CAPTION>"
+        try:
+            result = self._run_task(crop, task, max_new_tokens=256, num_beams=3)
+            return result.get(task, "")
+        except Exception as e:
+            print(f"Crop caption error: {e}")
+            return ""
 
 caption_service = CaptionService()

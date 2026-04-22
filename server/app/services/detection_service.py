@@ -1,10 +1,10 @@
 import torch
 from PIL import Image
-from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+from ultralytics import YOLOWorld
 
 
 class DetectionService:
-    """Grounding DINO — used for bounding box detection and video tracking.
+    """YOLO-World — used for open-vocabulary bounding box detection and video tracking.
 
     _verify_crop is available but ONLY used for static image detection
     (when the user clicks a search result).  It is NEVER used during
@@ -20,7 +20,7 @@ class DetectionService:
         return cls._instance
 
     def _initialize(self):
-        print("Initializing DetectionService (Grounding DINO)...")
+        print("Initializing DetectionService (YOLO-World)...")
         if torch.cuda.is_available():
             self.device = "cuda"
         elif torch.backends.mps.is_available():
@@ -28,52 +28,39 @@ class DetectionService:
         else:
             self.device = "cpu"
 
-        self.model_name = "IDEA-Research/grounding-dino-base"
-        self.processor = AutoProcessor.from_pretrained(self.model_name)
-        self.model = AutoModelForZeroShotObjectDetection.from_pretrained(
-            self.model_name
-        ).to(self.device)
-        self.model.eval()
+        # Load YOLO-World Large (best accuracy for open-vocabulary detection)
+        self.yolo_world = YOLOWorld("yolov8l-world.pt")
+        self.yolo_world.to(self.device)
 
     def _query_to_text(self, query: str) -> str:
-        """Grounding DINO expects a phrase ending with a period."""
-        return f"{query.strip().rstrip('.')}."
+        # YOLO-World just takes the phrase directly
+        return query.strip().lower()
 
     @torch.no_grad()
     def detect(self, image: Image.Image, query: str, threshold: float = 0.30,
                verify: bool = False):
-        """Returns the single highest-confidence box for the query phrase.
-
-        Parameters
-        ----------
-        verify : bool
-            If True, runs SigLIP crop verification to reject false positives.
-            Should be True for static image detection, False for video tracking.
-        """
+        """Returns the single highest-confidence box for the query phrase."""
         text = self._query_to_text(query)
-        inputs = self.processor(images=image, text=text, return_tensors="pt").to(self.device)
-        outputs = self.model(**inputs)
-
-        width, height = image.size
-        results = self.processor.post_process_grounded_object_detection(
-            outputs,
-            inputs.input_ids,
-            threshold=threshold,
-            target_sizes=[(height, width)]
-        )
-
-        scores = results[0]["scores"]
-        if len(scores) == 0:
+        self.yolo_world.set_classes([text])
+        
+        # Run YOLO-World
+        results = self.yolo_world(image, conf=threshold, verbose=False)
+        
+        if not results or len(results[0].boxes) == 0:
             return None
-
-        best_idx = scores.argmax().item()
-        raw_box = results[0]["boxes"][best_idx].tolist()
-
-        # Crop verification — only for static images (search result clicks),
-        # NEVER for real-time video tracking.
+            
+        boxes = results[0].boxes
+        
+        # Get the highest confidence box
+        best_idx = torch.argmax(boxes.conf).item()
+        raw_box = boxes.xyxy[best_idx].tolist()
+        score = boxes.conf[best_idx].item()
+        
+        # Crop verification — only for static images
         if verify and not self._verify_crop(image, raw_box, query):
             return None
 
+        width, height = image.size
         normalized_box = [
             raw_box[0] / width,
             raw_box[1] / height,
@@ -81,53 +68,37 @@ class DetectionService:
             raw_box[3] / height
         ]
 
-        labels = results[0].get("labels", [])
-        label = labels[best_idx] if best_idx < len(labels) else query
-
         return {
             "box": normalized_box,
-            "score": float(scores[best_idx].item()),
-            "label": label
+            "score": float(score),
+            "label": text
         }
 
     @torch.no_grad()
     def detect_multiple(self, image: Image.Image, query: str,
                         threshold: float = 0.30, verify: bool = False):
-        """Returns all boxes above threshold.
-
-        Parameters
-        ----------
-        verify : bool
-            If True, runs SigLIP crop verification on each box.
-            Should be False for video tracking (performance).
-        """
+        """Returns all boxes above threshold using YOLO-World."""
         text = self._query_to_text(query)
-        inputs = self.processor(images=image, text=text, return_tensors="pt").to(self.device)
-        outputs = self.model(**inputs)
-
-        width, height = image.size
-        results = self.processor.post_process_grounded_object_detection(
-            outputs,
-            inputs.input_ids,
-            threshold=threshold,
-            target_sizes=[(height, width)]
-        )
-
-        scores = results[0]["scores"]
-        if len(scores) == 0:
+        self.yolo_world.set_classes([text])
+        
+        # Run YOLO-World
+        results = self.yolo_world(image, conf=threshold, verbose=False)
+        
+        if not results or len(results[0].boxes) == 0:
             return []
-
-        boxes = results[0]["boxes"]
-        labels = results[0].get("labels", [])
-
+            
+        boxes = results[0].boxes
         detections = []
-        for i in range(len(scores)):
-            raw_box = boxes[i].tolist()
+        
+        width, height = image.size
+        
+        for i in range(len(boxes)):
+            raw_box = boxes.xyxy[i].tolist()
+            score = boxes.conf[i].item()
 
             if verify and not self._verify_crop(image, raw_box, query):
                 continue
 
-            label = labels[i] if i < len(labels) else query
             norm_box = [
                 raw_box[0] / width,
                 raw_box[1] / height,
@@ -136,8 +107,8 @@ class DetectionService:
             ]
             detections.append({
                 "box": norm_box,
-                "score": float(scores[i].item()),
-                "label": label
+                "score": float(score),
+                "label": text
             })
 
         detections.sort(key=lambda d: d["score"], reverse=True)
@@ -180,6 +151,68 @@ class DetectionService:
         except Exception as e:
             print(f"Crop verification error: {e}")
             return True
+
+    def detect_dense(self, image: Image.Image) -> list:
+        """Finds all distinct objects in an image using YOLO-World + SAHI.
+        Returns:
+            list of dicts: [{"bbox": [x1, y1, x2, y2], "label": "person", "score": 0.8}, ...]
+        """
+        from sahi import AutoDetectionModel
+        from sahi.predict import get_sliced_prediction
+        
+        # We only care about objects relevant to a multimodal search index.
+        # This prevents the database from being flooded with useless noise.
+        ALLOWED_CLASSES = [
+            'person', 'bicycle', 'car', 'motorcycle', 'bus', 'train', 'truck', 
+            'boat', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 
+            'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'sports ball', 
+            'kite', 'skateboard', 'surfboard', 'tennis racket', 'bottle'
+        ]
+
+        if not hasattr(self, 'sahi_model'):
+            # Use YOLO-World Large for surveillance-grade detection
+            self.sahi_model = AutoDetectionModel.from_pretrained(
+                model_type='yolov8',
+                model_path='yolov8l-world.pt',
+                confidence_threshold=0.25,
+                device=self.device
+            )
+            # Set the classes for YOLO-World
+            self.sahi_model.model.set_classes(ALLOWED_CLASSES)
+
+        # Slice the image into tiles, run YOLO on tiles + full image, and merge.
+        # perform_standard_pred=True ensures large objects (like the black dog) 
+        # are detected as a whole on the full image pass.
+        result = get_sliced_prediction(
+            image,
+            self.sahi_model,
+            slice_height=512,
+            slice_width=512,
+            overlap_height_ratio=0.2,
+            overlap_width_ratio=0.2,
+            perform_standard_pred=True,
+            postprocess_type="NMM", # Non-Max Merging is better for sliced inference
+            postprocess_match_threshold=0.5
+        )
+        
+        ALLOWED_CLASSES_SET = set(ALLOWED_CLASSES)
+        
+        # Deduplicate and normalize boxes
+        final_boxes = []
+        
+        for pred in result.object_prediction_list:
+            cls_name = pred.category.name
+            if cls_name in ALLOWED_CLASSES_SET:
+                b = pred.bbox.to_xyxy() # [x1, y1, x2, y2]
+                final_boxes.append({
+                    "bbox": b,
+                    "label": cls_name,
+                    "score": pred.score.value
+                })
+                
+        # Limit to the top 40 most confident objects per frame to prevent DB bloat
+        final_boxes.sort(key=lambda x: x["score"], reverse=True)
+        return final_boxes[:40]
 
 
 detection_service = DetectionService()

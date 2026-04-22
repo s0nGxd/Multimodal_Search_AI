@@ -202,43 +202,40 @@ class SearchService:
 
     def search(self, query: str, k: int = 20, threshold: float = 0.20,
                deep_search: bool = False) -> list:
-        """Description-first hybrid search.
+        """Description-first hybrid search."""
+        import json
+        import datetime
+        
+        # ── Setup Debug Logging ──────────────────────────────────────
+        log_file = "search_debug.log"
+        def log_debug(msg):
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] {msg}\n")
 
-        Architecture
-        ------------
-        The key insight: Florence-2 already identified every object at upload
-        time.  The stored description IS the ground truth for object identity.
+        log_debug(f"\n{'='*80}\nNEW SEARCH REQUEST: '{query}'\n{'='*80}")
+        query_nouns = _extract_nouns(query)
+        query_adjectives = _extract_adjectives(query)
+        log_debug(f"Extracted Nouns: {query_nouns}")
+        log_debug(f"Extracted Adjectives: {query_adjectives}")
 
-        Layer 1 — Retrieval (SigLIP ANN + BM25):
-          Fast candidate retrieval (~60 items, <1s).
-
-        Layer 2 — Object Identification (Description Match):
-          PRIMARY SIGNAL. If the core noun from the query appears in the
-          stored description, the image is confirmed.  Adjectives (brown,
-          small) are used as a ranking bonus, not a filter.
-
-        Layer 3 — Ranking:
-          Confirmed images:   0.85–0.99 (noun match + adj bonus + rank bonus)
-          Unconfirmed images: 0.05–0.25 (visual rank only, always below threshold)
-
-        Layer 4 — Deep Search (optional, ~30s):
-          Florence-2 phrase-grounding on top 8 CONFIRMED results.
-          Only boosts already-confirmed results — never promotes unconfirmed ones.
-
-        Score ranges (with default 0.80 threshold):
-          0.85–0.99  =  Description confirms the object
-          0.05–0.25  =  Visually similar but description doesn't match → filtered
-        """
         if self.table is None:
             self.refresh_table()
             if self.table is None:
+                log_debug("ERROR: LanceDB table not found.")
                 return []
 
         vector_query = f"a photo of {query.strip()}"
         query_vec = self.embed_text(vector_query)
         select_cols = [
             "photo_id", "photo_image_url", "video_url",
-            "timestamp", "description", "_distance"
+            "timestamp", "description", "_distance",
+            "is_region", "parent_photo_id", "bbox", "region_label"
+        ]
+        fts_select_cols = [
+            "photo_id", "photo_image_url", "video_url",
+            "timestamp", "description",
+            "is_region", "parent_photo_id", "bbox", "region_label"
         ]
         ranked_lists = []
 
@@ -247,153 +244,180 @@ class SearchService:
             df = (self.table.search(query_vec, vector_column_name="vector")
                   .metric("cosine").limit(k * 3).select(select_cols).to_pandas())
             ranked_lists.append(df)
+            log_debug(f"Layer 1a (Image ANN): Retrieved {len(df)} candidates.")
         except Exception as e:
-            print(f"Image ANN failed: {e}")
+            log_debug(f"Layer 1a (Image ANN) FAILED: {e}")
 
         # ── Layer 1b: Caption vector ANN ─────────────────────────────────
         try:
             df = (self.table.search(query_vec, vector_column_name="caption_vector")
                   .metric("cosine").limit(k * 3).select(select_cols).to_pandas())
             ranked_lists.append(df)
+            log_debug(f"Layer 1b (Caption ANN): Retrieved {len(df)} candidates.")
         except Exception as e:
-            print(f"Caption ANN failed: {e}")
+            log_debug(f"Layer 1b (Caption ANN) FAILED: {e}")
 
         # ── Layer 1c: BM25 full-text ─────────────────────────────────────
         bm25_pids: set = set()
         try:
             fts_df = (self.table.search(query, query_type="fts")
                       .limit(k * 3)
-                      .select(["photo_id", "photo_image_url", "video_url",
-                               "timestamp", "description"])
+                      .select(fts_select_cols)
                       .to_pandas())
             fts_df["_distance"] = 1.0
             ranked_lists.append(fts_df)
             bm25_pids = set(str(p) for p in fts_df["photo_id"].tolist())
+            log_debug(f"Layer 1c (BM25): Retrieved {len(fts_df)} candidates.")
         except Exception as e:
-            print(f"BM25 skipped: {e}")
+            log_debug(f"Layer 1c (BM25) skipped: {e}")
 
-        # ── RRF Fusion ───────────────────────────────────────────────────
+        # ── RRF Fusion & Region Deduplication ────────────────────────────
+        import re as _re
+        
         RRF_K = 60
         rrf_scores: dict = {}
         best_row: dict = {}
+        parent_region_info: dict = {}  # parent_pid -> {"bbox": ..., "description": ..., "score": ...}
 
-        for result_df in ranked_lists:
+        for i, result_df in enumerate(ranked_lists):
             if result_df is None or result_df.empty:
                 continue
             for rank, (_, row) in enumerate(result_df.iterrows()):
-                pid = str(row["photo_id"])
-                rrf_scores[pid] = rrf_scores.get(pid, 0.0) + 1.0 / (RRF_K + rank + 1)
-                if pid not in best_row:
-                    best_row[pid] = row.to_dict()
+                is_region = row.get("is_region", False)
+                rrf_contribution = 1.0 / (RRF_K + rank + 1)
+                
+                if is_region and row.get("parent_photo_id"):
+                    parent_pid = str(row["parent_photo_id"])
+                    region_desc = str(row.get("description", "")).lower()
+                    
+                    noun_hit = any(
+                        _re.search(r'\b' + _re.escape(n) + r'\b', region_desc)
+                        for n in query_nouns
+                    ) if query_nouns else False
+                    
+                    if noun_hit:
+                        rrf_scores[parent_pid] = rrf_scores.get(parent_pid, 0.0) + rrf_contribution
+                        region_noun, region_adj = self._description_match_score(query, region_desc)
+                        region_match_quality = region_noun + region_adj
+                        
+                        prev_quality = parent_region_info.get(parent_pid, {}).get("match_quality", -1.0)
+                        if region_match_quality > prev_quality:
+                            bbox_str = row.get("bbox", "")
+                            parent_region_info[parent_pid] = {
+                                "bbox": json.loads(bbox_str) if bbox_str else None,
+                                "description": row.get("region_label", row.get("description", "")),
+                                "match_quality": region_match_quality
+                            }
+                else:
+                    pid = str(row["photo_id"])
+                    rrf_scores[pid] = rrf_scores.get(pid, 0.0) + rrf_contribution
+                    if pid not in best_row:
+                        best_row[pid] = row.to_dict()
+        
+        log_debug(f"RRF Fusion: {len(rrf_scores)} unique frames ranked.")
+        
+        for parent_pid, region_info in parent_region_info.items():
+            if parent_pid not in best_row:
+                continue
+            if region_info.get("bbox"):
+                best_row[parent_pid]["_f2_box"] = region_info["bbox"]
+            if region_info.get("description"):
+                best_row[parent_pid]["_region_description"] = region_info["description"]
 
         if not rrf_scores:
+            log_debug("No results found.")
             return []
 
         # ── Layer 2 + 3: Description scoring ─────────────────────────────
         sorted_pids = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)
-        total = len(sorted_pids)
+        log_debug("\nSCORING BREAKDOWN (Top 10):")
 
         for rank_pos, pid in enumerate(sorted_pids):
+            if pid not in best_row:
+                continue
             row = best_row[pid]
             desc = str(row.get("description", ""))
+            region_desc = str(row.get("_region_description", ""))
 
             noun_score, adj_bonus = self._description_match_score(query, desc)
+            if noun_score == 0.0 and region_desc:
+                noun_score, adj_bonus = self._description_match_score(query, region_desc)
 
-            # BM25 floor: only if BM25 matched AND the core noun appears
-            # in the description (prevents "brown horse" from being confirmed
-            # for query "brown dog")
             if noun_score == 0.0 and pid in bm25_pids:
-                nouns = _extract_nouns(query)
-                desc_lower = desc.lower()
-                if nouns and any(re.search(r'\b' + re.escape(n) + r'\b', desc_lower)
-                                 for n in nouns):
+                desc_lower = desc.lower() + " " + region_desc.lower()
+                if query_nouns and any(re.search(r'\b' + re.escape(n) + r'\b', desc_lower)
+                                 for n in query_nouns):
                     noun_score = 0.85
 
-            # Visual Similarity from SigLIP (1.0 - distance)
-            # Typically ranges from 0.15 to 0.35, but can be higher.
             visual_sim = max(0.0, 1.0 - float(row.get("_distance", 1.0)))
 
             if noun_score > 0:
-                # CONFIRMED: core noun is in description
-                # Base score 0.80 + Adjective bonus (up to 0.07) + Visual similarity (up to ~0.15)
-                # This guarantees confirmed items pass the 0.80 threshold, but provides wide
-                # score variation based on actual visual match (e.g., "black dog" vs "dog" color match)
-                combined = 0.80 + adj_bonus + (visual_sim * 0.5)
+                combined = 0.82 + adj_bonus + (visual_sim * 0.15)
             else:
-                # NOT CONFIRMED: Rank by visual similarity alone, suppressed by 0.50 threshold penalty
-                combined = visual_sim * 0.5
+                combined = visual_sim * 0.25
 
             best_row[pid]["_noun_score"] = noun_score
             best_row[pid]["_combined_score"] = min(0.99, combined)
+            
+            if rank_pos < 10:
+                log_debug(f"[{rank_pos+1}] PID: {pid}")
+                log_debug(f"    Global Desc: '{desc[:60]}...'")
+                log_debug(f"    Region Desc: '{region_desc[:60]}...'")
+                log_debug(f"    Scores: Noun={noun_score:.2f}, AdjBonus={adj_bonus:.2f}, VisualSim={visual_sim:.2f}")
+                log_debug(f"    FINAL SCORE: {combined:.4f}")
 
-        # ── Layer 4: Florence-2 Deep Search (optional, top 8 confirmed) ──
+        # ── Layer 4: Florence-2 Deep Search (optional) ──────────────────
         DEEP_LIMIT = 8
         if deep_search:
             from app.services.caption_service import caption_service
-
-            # ONLY run on CONFIRMED results (noun_score > 0)
             confirmed = [p for p in sorted_pids
-                         if best_row[p].get("_noun_score", 0) > 0][:DEEP_LIMIT]
+                         if p in best_row and best_row[p].get("_noun_score", 0) > 0][:DEEP_LIMIT]
 
-            print(f"[Deep Search] Florence-2 grounding on {len(confirmed)} confirmed candidates…")
+            log_debug(f"\n[Deep Search] Grounding on {len(confirmed)} candidates...")
             for pid in confirmed:
                 row = best_row[pid]
                 url = row.get("photo_image_url", "")
-                if "/images/" not in url:
-                    continue
-                file_name = url.split("/images/")[-1]
-                local_path = os.path.join("data", file_name)
-                if not os.path.exists(local_path):
-                    continue
+                if "/images/" not in url: continue
+                local_path = os.path.join("data", url.split("/images/")[-1])
+                if not os.path.exists(local_path): continue
                 try:
                     img = Image.open(local_path).convert("RGB")
                     img.thumbnail((800, 800))
                     grounding = caption_service.ground_phrase(img, query)
                     best_row[pid]["_verified"] = grounding["found"]
-                    best_row[pid]["_f2_score"] = grounding["score"]
                     best_row[pid]["_f2_box"] = grounding["box"]
                     if grounding["found"]:
-                        # Small bonus to already-confirmed result — never
-                        # exceeds current score + 0.04 (prevents over-boosting)
-                        current = best_row[pid]["_combined_score"]
-                        best_row[pid]["_combined_score"] = min(0.99,
-                            current + 0.03)
-                    print(f"  [{pid}] found={grounding['found']} "
-                          f"score={grounding['score']:.3f}")
+                        best_row[pid]["_combined_score"] = min(0.99, best_row[pid]["_combined_score"] + 0.03)
+                    log_debug(f"    PID {pid}: found={grounding['found']}, box={grounding['box']}")
                 except Exception as e:
-                    print(f"  Florence-2 error for {pid}: {e}")
+                    log_debug(f"    PID {pid}: Deep Search ERROR: {e}")
 
         # ── Build final result list ──────────────────────────────────────
         seen_videos: set = set()
         results = []
+        final_order = sorted(best_row.keys(), key=lambda p: best_row[p].get("_combined_score", 0), reverse=True)
 
-        final_order = sorted(
-            best_row.keys(),
-            key=lambda p: best_row[p].get("_combined_score", 0),
-            reverse=True
-        )
-
+        log_debug("\nFINAL TOP 5 RESULTS:")
         for pid in final_order:
             row = best_row[pid].copy()
             v_url = str(row.get("video_url") or "").strip()
-
-            if v_url and v_url in seen_videos:
-                continue
-            if v_url:
-                seen_videos.add(v_url)
+            if v_url and v_url in seen_videos: continue
+            if v_url: seen_videos.add(v_url)
 
             final_sim = row.get("_combined_score", 0.0)
-            if final_sim < threshold:
-                continue
+            if final_sim < threshold: continue
 
             row["similarity_score"] = final_sim
             row["verified"] = bool(row.get("_verified", False))
             row["florence_box"] = row.get("_f2_box", None)
             results.append(row)
+            
+            if len(results) <= 5:
+                log_debug(f"    - {pid}: Score {final_sim:.4f} ({row.get('photo_image_url')})")
 
-            if len(results) >= k:
-                break
+            if len(results) >= k: break
 
+        log_debug(f"Search complete. Returning {len(results)} results.\n")
         return results
 
 

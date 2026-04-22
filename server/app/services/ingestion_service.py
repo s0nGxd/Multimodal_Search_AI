@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 from .search_service import search_service
 from .caption_service import caption_service
+from .detection_service import detection_service
 from .persistence_service import sync_to_repo
 
 load_dotenv()
@@ -29,6 +30,12 @@ class ImageRecord(LanceModel):
     description: str = ""
     vector: Vector(EMBED_DIM)
     caption_vector: Vector(EMBED_DIM)
+    
+    # ── Dense Region Fields ──
+    is_region: bool = False
+    parent_photo_id: str = ""
+    bbox: str = ""          # Stored as JSON string "[x1, y1, x2, y2]"
+    region_label: str = ""  # The dense region caption for this specific crop
 
 
 def _download_image(photo_id: str, url: str, timeout: int = 10) -> tuple[str, str, Image.Image | None]:
@@ -46,6 +53,61 @@ class IngestionService:
     def __init__(self):
         self.data_dir = Path(os.getenv("DATA_DIR", "data"))
         self.data_dir.mkdir(exist_ok=True)
+
+    def _extract_regions(self, img: Image.Image, original_id: str, photo_url: str, video_url: str = "", timestamp: float = 0.0) -> List[ImageRecord]:
+        import json
+        region_records = []
+        
+        # 1. Use YOLO-World Large + SAHI to find all dense objects.
+        # Fixed SAHI configuration handles large objects (like the black dog) correctly.
+        detected_objects = detection_service.detect_dense(img)
+        
+        for i, obj in enumerate(detected_objects):
+            try:
+                box = obj["bbox"] # [x1, y1, x2, y2]
+                base_label = obj["label"]
+                
+                # 2. Use Florence-2 to describe the region in the context of the FULL image.
+                # This ensures attributes like color and action are preserved (e.g. "yellow car").
+                detailed_caption = caption_service.region_to_description(img, box)
+                
+                if not detailed_caption:
+                    detailed_caption = base_label
+                
+                # Prepend the YOLO base label so the canonical name is always searchable.
+                if base_label.lower() not in detailed_caption.lower():
+                    detailed_caption = f"{base_label}. {detailed_caption}"
+                    
+                # 3. Dual-Encoder: Generate visual vector (focused on the object) 
+                # and text attribute vector (context-aware description).
+                crop_img = img.crop(box)
+                # Ignore tiny crops that will crash models
+                if crop_img.width < 10 or crop_img.height < 10:
+                    continue
+
+                vector = search_service.embed_image(crop_img)
+                caption_vector = search_service.embed_text(detailed_caption)
+                
+                # Normalize box coordinates to 0..1 range for the frontend tracking
+                w, h = img.size
+                norm_box = [box[0]/w, box[1]/h, box[2]/w, box[3]/h]
+                
+                region_records.append(ImageRecord(
+                    photo_id=f"{original_id}_region_{i}",
+                    photo_image_url=photo_url,
+                    video_url=video_url,
+                    timestamp=timestamp,
+                    description=detailed_caption,
+                    vector=vector,
+                    caption_vector=caption_vector,
+                    is_region=True,
+                    parent_photo_id=original_id,
+                    bbox=json.dumps(norm_box),
+                    region_label=detailed_caption
+                ))
+            except Exception as e:
+                print(f"Failed to process region {i} for {original_id}: {e}")
+        return region_records
 
     def process_upload(self, file_contents: bytes, filename: str):
         original_id = Path(filename).stem
@@ -78,21 +140,28 @@ class IngestionService:
                 os.remove(file_path)
             raise ValueError(f"Invalid image file: {e}")
 
+        # ── Global Frame ──
         vector = search_service.embed_image(img)
         description = caption_service.generate_caption(img)
         caption_vector = search_service.embed_text(description)
 
         photo_url = f"/images/{unique_filename}"
-        record = ImageRecord(
+        global_record = ImageRecord(
             photo_id=original_id,
             photo_image_url=photo_url,
             description=description,
             vector=vector,
             caption_vector=caption_vector,
         )
-        self._insert_records([record])
+        
+        # ── Dense Regions ──
+        records = [global_record]
+        region_records = self._extract_regions(img, original_id, photo_url)
+        records.extend(region_records)
+
+        self._insert_records(records)
         sync_to_repo()
-        return {"id": original_id, "url": photo_url, "description": "Single image indexed", "status": "indexed"}
+        return {"id": original_id, "url": photo_url, "description": f"Image indexed with {len(region_records)} regions", "status": "indexed"}
 
     def _process_video_upload(self, file_path: Path, filename: str):
         import cv2
@@ -127,12 +196,13 @@ class IngestionService:
             frame_path = self.data_dir / frame_filename
             img.save(frame_path)
             
+            # ── Global Frame ──
             vector = search_service.embed_image(img)
             description = caption_service.generate_caption(img)
             caption_vector = search_service.embed_text(description)
             
             photo_url = f"/images/{frame_filename}"
-            records.append(ImageRecord(
+            global_record = ImageRecord(
                 photo_id=f"{file_path.stem}_frame_{frame_idx}",
                 photo_image_url=photo_url,
                 video_url=f"/images/{filename}",
@@ -140,7 +210,18 @@ class IngestionService:
                 description=description,
                 vector=vector,
                 caption_vector=caption_vector,
-            ))
+            )
+            records.append(global_record)
+            
+            # ── Dense Regions ──
+            region_records = self._extract_regions(
+                img, 
+                original_id=f"{file_path.stem}_frame_{frame_idx}",
+                photo_url=photo_url,
+                video_url=f"/images/{filename}",
+                timestamp=float(frame_idx) / float(fps)
+            )
+            records.extend(region_records)
             
         if records:
             self._insert_records(records)
@@ -149,7 +230,7 @@ class IngestionService:
         return {
             "id": file_path.stem, 
             "url": f"/images/{filename}", 
-            "description": f"Video indexed with {len(records)} frames", 
+            "description": f"Video indexed with {len(records)} records (frames + regions)", 
             "status": "indexed"
         }
 
