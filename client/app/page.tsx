@@ -116,7 +116,7 @@ export default function Home() {
                             }
 
                             trackStates.current.set(t.track_id, { lastBox: t.bbox, lastTime: now });
-                            return { ...t, bbox: predictedBox };
+                            return { ...t, bbox: predictedBox as [number, number, number, number] };
                         });
 
                         setBboxes(updatedTracks);
@@ -330,6 +330,8 @@ export default function Home() {
                                         src={img.photo_image_url}
                                         alt={img.photo_id}
                                         className="w-full h-auto object-cover transform transition-transform duration-500 group-hover:scale-110"
+                                        loading="lazy"
+                                        decoding="async"
                                     />
                                     {img.video_url && (
                                         <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
@@ -399,6 +401,7 @@ export default function Home() {
                                         src={focusedImage.photo_image_url}
                                         alt={focusedImage.photo_id}
                                         className="max-h-[70vh] w-auto"
+                                        decoding="async"
                                     />
                                 )}
                                 {bboxes.map((box) => (

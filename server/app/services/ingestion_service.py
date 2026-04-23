@@ -12,7 +12,6 @@ from lancedb.pydantic import LanceModel, Vector
 from dotenv import load_dotenv
 
 from .search_service import search_service
-from .caption_service import caption_service
 from .persistence_service import sync_to_repo
 
 load_dotenv()
@@ -27,9 +26,7 @@ class ImageRecord(LanceModel):
     photo_image_url: str
     video_url: str = ""
     timestamp: float = 0.0
-    description: str = ""
     vector: Vector(EMBED_DIM)
-    caption_vector: Vector(EMBED_DIM)
 
 
 def _download_image(photo_id: str, url: str, timeout: int = 10) -> tuple[str, str, Image.Image | None]:
@@ -85,20 +82,16 @@ class IngestionService:
             raise ValueError(f"Invalid image file: {e}")
 
         vector = search_service.embed_image(img)
-        description = caption_service.generate_caption(img)
-        caption_vector = search_service.embed_text(description)
 
-        photo_url = f"/images/{filename}"
+        photo_url = f"/images/{unique_filename}"
         record = ImageRecord(
             photo_id=file_path.stem,
             photo_image_url=photo_url,
-            description=description,
             vector=vector,
-            caption_vector=caption_vector,
         )
         self._insert_records([record])
         sync_to_repo()
-        return {"id": file_path.stem, "url": photo_url, "description": description, "status": "indexed"}
+        return {"id": file_path.stem, "url": photo_url, "status": "indexed"}
 
     def _process_video_upload(self, file_path: Path, filename: str):
         import cv2
@@ -134,18 +127,14 @@ class IngestionService:
             img.save(frame_path)
             
             vector = search_service.embed_image(img)
-            description = caption_service.generate_caption(img)
-            caption_vector = search_service.embed_text(description)
-            
+
             photo_url = f"/images/{frame_filename}"
             records.append(ImageRecord(
                 photo_id=f"{file_path.stem}_frame_{frame_idx}",
                 photo_image_url=photo_url,
                 video_url=f"/images/{filename}",
                 timestamp=float(frame_idx) / float(fps),
-                description=description,
                 vector=vector,
-                caption_vector=caption_vector,
             ))
             
         if records:
@@ -153,10 +142,10 @@ class IngestionService:
             sync_to_repo()
             
         return {
-            "id": file_path.stem, 
-            "url": f"/images/{filename}", 
-            "description": f"Video indexed with {len(records)} frames", 
-            "status": "indexed"
+            "id": file_path.stem,
+            "url": f"/images/{filename}",
+            "status": "indexed",
+            "frames": len(records),
         }
 
     def process_url_upload(self, url: str, photo_id: Optional[str] = None):
@@ -168,22 +157,18 @@ class IngestionService:
             raise ValueError(f"Failed to fetch image from URL: {e}")
 
         vector = search_service.embed_image(img)
-        description = caption_service.generate_caption(img)
-        caption_vector = search_service.embed_text(description)
         pid = photo_id or f"remote_{hash(url)}"
 
         record = ImageRecord(
             photo_id=pid,
             photo_image_url=url,
-            description=description,
             vector=vector,
-            caption_vector=caption_vector,
         )
         self._insert_records([record])
         sync_to_repo()
-        return {"id": pid, "url": url, "description": description, "status": "indexed"}
+        return {"id": pid, "url": url, "status": "indexed"}
 
-    def process_bulk_csv(self, csv_path: str, limit: int = 100, generate_captions: bool = False, max_workers: int = 8, batch_size: int = 16):
+    def process_bulk_csv(self, csv_path: str, limit: int = 100, max_workers: int = 8, batch_size: int = 16):
         try:
             df = pd.read_csv(csv_path, sep='\t', nrows=limit)
         except Exception as e:
@@ -207,34 +192,20 @@ class IngestionService:
 
         print(f"Downloaded {len(downloaded)} images. Generating embeddings in batches of {batch_size}...")
 
-        # Phase 2: Batch embed all images through CLIP
+        # Phase 2: Batch embed all images through SigLIP
         images = [img for _, _, img in downloaded]
         vectors = search_service.embed_images_batch(images, batch_size=batch_size)
 
-        # Phase 3: Optionally caption (expensive — off by default for bulk)
-        import numpy as np
-        zero_vec = np.zeros(EMBED_DIM, dtype="float32")
-        records = []
-        for i, (photo_id, url, img) in enumerate(downloaded):
-            description = ""
-            cap_vec = zero_vec
-            if generate_captions:
-                description = caption_service.generate_caption(img)
-                cap_vec = search_service.embed_text(description)
+        records = [
+            ImageRecord(photo_id=photo_id, photo_image_url=url, vector=vectors[i])
+            for i, (photo_id, url, _) in enumerate(downloaded)
+        ]
 
-            records.append(ImageRecord(
-                photo_id=photo_id,
-                photo_image_url=url,
-                description=description,
-                vector=vectors[i],
-                caption_vector=cap_vec,
-            ))
-
-        # Phase 4: Insert all records at once
+        # Phase 3: Insert all records at once
         print(f"Inserting {len(records)} records into LanceDB...")
         self._insert_records(records)
 
-        # Phase 5: Build IVF-PQ index if table is large enough
+        # Phase 4: Build IVF-PQ index if table is large enough
         self._maybe_create_index()
 
         sync_to_repo()
@@ -247,13 +218,6 @@ class IngestionService:
             table.add(records)
         except Exception:
             table = db.create_table("images", schema=ImageRecord, data=records)
-
-        # Build/refresh BM25 full-text search index on the description field
-        # so that keyword queries (Channel 3) can find exact matches.
-        try:
-            table.create_fts_index("description", replace=True)
-        except Exception as e:
-            print(f"FTS index creation skipped: {e}")
 
         search_service.refresh_table()
 

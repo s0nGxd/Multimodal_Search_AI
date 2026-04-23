@@ -33,7 +33,7 @@ ENV DATA_DIR=/data/images
 ENV PORT=7860
 ENV EMBED_MODEL=google/siglip-base-patch16-256
 ENV EMBED_DIM=768
-ENV BACKEND_URL=https://aariz-s-segp-semantic-search.hf.space
+ENV BACKEND_URL=https://aariz-s-segp-siglip-search.hf.space
 ENV HF_DATASET_REPO=aariz-s/segp-search-data
 
 # Expose port (HF Spaces expects 7860)

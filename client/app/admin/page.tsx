@@ -431,6 +431,7 @@ export default function AdminPage() {
                                                     alt={img.photo_id}
                                                     className="w-full h-40 object-cover"
                                                     loading="lazy"
+                                                    decoding="async"
                                                 />
                                                 {img.video_url && (
                                                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
@@ -563,6 +564,7 @@ export default function AdminPage() {
                                         src={focusedImage.photo_image_url}
                                         alt={focusedImage.photo_id}
                                         className="max-h-[70vh] w-auto"
+                                        decoding="async"
                                     />
                                 )}
                             </div>

@@ -54,7 +54,9 @@ class SearchService:
             self._text_cache.move_to_end(cache_key)
             return self._text_cache[cache_key]
 
-        inputs = self.processor(text=[text], return_tensors="pt", padding=True, truncation=True).to(self.device)
+        # SigLIP expects padding='max_length' (fixed 64 tokens). Using padding=True
+        # gives wrong embeddings for single queries.
+        inputs = self.processor(text=[text], return_tensors="pt", padding="max_length", truncation=True).to(self.device)
         text_features = self.model.get_text_features(**inputs)
 
         if hasattr(text_features, "pooler_output"):
@@ -97,18 +99,11 @@ class SearchService:
         return all_vectors
 
     def search(self, query: str, k: int = 20, threshold: float = 0.20) -> list[dict]:
-        """Hybrid search using 3 channels fused via Reciprocal Rank Fusion (RRF).
-        
-        Channels:
-          1. Image vector search  — visual similarity (SigLIP image embedding)
-          2. Caption vector search — semantic text match (SigLIP text embedding vs caption)
-          3. BM25 full-text search — exact keyword match on the description field
+        """SigLIP image-vector search with OWL-ViT detection re-ranking.
 
-        The vector channels use a 'a photo of {query}' prompt template for improved
-        SigLIP accuracy. BM25 uses the raw query for exact keyword matching.
-
-        Results are merged with RRF. Each result carries its _rrf_score so the router
-        can display it as a normalized, intuitive percentage.
+        The query is embedded using a 'a photo of {query}' prompt template for
+        improved SigLIP accuracy. Top candidates are then re-ranked by
+        OWL-ViT detection confidence on the same query phrase.
         """
         if self.table is None:
             self.refresh_table()
@@ -117,10 +112,10 @@ class SearchService:
 
         vector_query = f"a photo of {query.strip()}"
         query_vec = self.embed_text(vector_query)
-        select_cols = ["photo_id", "photo_image_url", "video_url", "timestamp", "description", "_distance"]
+        select_cols = ["photo_id", "photo_image_url", "video_url", "timestamp"]
         ranked_lists = []
 
-        # We query wider nets (k * 2) so we have enough candidates before filtering via threshold at the end
+        # Wider net (k * 2) so we have enough candidates before filtering via threshold.
         try:
             df = (
                 self.table.search(query_vec, vector_column_name="vector")
@@ -129,34 +124,10 @@ class SearchService:
                 .select(select_cols)
                 .to_pandas()
             )
+            # LanceDB auto-injects _distance after .search(); don't select it explicitly.
             ranked_lists.append(df)
         except Exception as e:
             print(f"Image vector search failed: {e}")
-
-        try:
-            df = (
-                self.table.search(query_vec, vector_column_name="caption_vector")
-                .metric("cosine")
-                .limit(k * 2)
-                .select(select_cols)
-                .to_pandas()
-            )
-            ranked_lists.append(df)
-        except Exception as e:
-            print(f"Caption vector search failed: {e}")
-
-        try:
-            fts_df = (
-                self.table.search(query, query_type="fts")
-                .limit(k * 2)
-                .select(["photo_id", "photo_image_url", "video_url", "timestamp", "description"])
-                .to_pandas()
-            )
-            fts_df["_distance"] = 1.0
-            fts_df["_bm25_found"] = True
-            ranked_lists.append(fts_df)
-        except Exception as e:
-            print(f"BM25 search skipped: {e}")
 
         RRF_K = 60
         rrf_scores: dict[str, float] = {}
@@ -168,17 +139,13 @@ class SearchService:
             for rank, (_, row) in enumerate(result_df.iterrows()):
                 pid = row["photo_id"]
                 rrf_scores[pid] = rrf_scores.get(pid, 0.0) + 1.0 / (RRF_K + rank + 1)
-                
+
                 row_dist = float(row.get("_distance", 1.0))
-                is_bm25 = bool(row.get("_bm25_found", False))
-                
+
                 if pid not in best_row:
                     best_row[pid] = row.to_dict()
-                else:
-                    if row_dist < float(best_row[pid].get("_distance", 1.0)):
-                        best_row[pid]["_distance"] = row_dist
-                    if is_bm25:
-                        best_row[pid]["_bm25_found"] = True
+                elif row_dist < float(best_row[pid].get("_distance", 1.0)):
+                    best_row[pid]["_distance"] = row_dist
 
         if not rrf_scores:
             return []
@@ -194,7 +161,7 @@ class SearchService:
             url = row.get("photo_image_url", "")
             if "/images/" in url:
                 file_name = url.split("/images/")[-1]
-                local_path = os.path.join("data", file_name)
+                local_path = os.path.join(os.getenv("DATA_DIR", "data"), file_name)
                 if os.path.exists(local_path):
                     try:
                         img = Image.open(local_path).convert("RGB")
@@ -212,8 +179,12 @@ class SearchService:
 
         sorted_pids = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)
 
-        SIM_FLOOR = 0.15
-        SIM_CEIL = 1.00
+        # Calibrated for pure SigLIP cross-modal (no caption_vector).
+        # SigLIP single-query text-image cosine sim runs narrower than CLIP
+        # (roughly 0.00..0.20). Floor at 0 so any positive match is visible;
+        # detection boost handles lifting confident matches into the 50-90% band.
+        SIM_FLOOR = 0.00
+        SIM_CEIL = 0.20
 
         def rescale_dist(dist: float) -> float:
             raw_sim = 1.0 - dist
@@ -234,44 +205,13 @@ class SearchService:
             dist = float(row.get("_distance", 1.0))
             det_score = float(row.get("_detection_score", 0.0))
 
-            # --- TIERED KEYWORD MATCHING ---
-            desc = row.get("description", "").lower()
-            norm_query = query.strip().lower()
-            q_words = [w.lower() for w in norm_query.split() if len(w) > 2]
-
-            is_full_match = row.get("_bm25_found", False) or (norm_query in desc)
-            
-            # Calculate Proportional Match Ratio (Matched Words / Total Words)
-            matched_words = [w for w in q_words if w in desc]
-            match_ratio = len(matched_words) / len(q_words) if q_words else 0.0
-
-            # 1. Base Score from SigLIP (Visual Foundation)
+            # 1. Base score from SigLIP (cross-modal similarity, rescaled to 0..1)
             final_sim = rescale_dist(dist)
 
-            # 2. ASYMPTOTIC BOOSTING (Gap Closure Math)
-            
-            # PHYSICAL DETECTION (OWL-ViT) - High Weight (80% gap closure)
+            # 2. OWL-ViT detection re-rank — close 80% of the gap weighted by confidence
             if det_score > 0.10:
-                # If OWL-ViT is confident (e.g. 0.70 for brown dog), close 80% of the gap
-                # based on that confidence.
-                detection_weight = 0.80 * det_score
-                final_sim += (1.0 - final_sim) * detection_weight
-            elif rrf_scores[pid] >= 1.0:
-                # Small generic boost if channels agree
-                final_sim += (1.0 - final_sim) * 0.10
+                final_sim += (1.0 - final_sim) * (0.80 * det_score)
 
-            # DESCRIPTION MATCH (Textual Bonus) - Lower Weight
-            if is_full_match:
-                # Full Phrase Match: Close 60% of the remaining gap
-                final_sim += (1.0 - final_sim) * 0.60
-            elif match_ratio > 0:
-                # Partial Match: Close 35% of the remaining gap based on match ratio
-                final_sim += (1.0 - final_sim) * (0.35 * match_ratio)
-
-            # No hard floors (max calls) anymore. 
-            # This allows the SigLIP color penalty to actually lower the score.
-
-            # Cap at 99.9%
             final_sim = min(0.999, final_sim)
 
             

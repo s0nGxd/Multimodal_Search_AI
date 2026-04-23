@@ -38,6 +38,8 @@ class CORSStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):
         response = await super().get_response(path, scope)
         response.headers["Access-Control-Allow-Origin"] = "*"
+        # Aggressive cache — filenames include timestamps so content is immutable per URL.
+        response.headers["Cache-Control"] = "public, max-age=86400, immutable"
         return response
 
 # Mount static files (uploaded images) with CORS injection

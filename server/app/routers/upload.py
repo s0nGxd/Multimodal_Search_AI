@@ -18,7 +18,6 @@ class URLIngestRequest(BaseModel):
 class BulkIngestRequest(BaseModel):
     csv_path: str = "../photos.csv000"
     limit: int = 50
-    generate_captions: bool = False
 
 @router.post("/upload")
 async def upload_image(file: UploadFile = File(...)):
@@ -81,7 +80,7 @@ async def clear_database():
 async def ingest_bulk(req: BulkIngestRequest):
     try:
         # We run this in the background ideally, but for now simple call
-        result = ingestion_service.process_bulk_csv(req.csv_path, req.limit, generate_captions=req.generate_captions)
+        result = ingestion_service.process_bulk_csv(req.csv_path, req.limit)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
