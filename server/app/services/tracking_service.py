@@ -60,30 +60,97 @@ class TrackingService:
         self.sam2_checkpoint = os.getenv("SAM2_CHECKPOINT", None)
         if not self.sam2_checkpoint and SAM2_AVAILABLE:
             self.sam2_cfg = "sam2_hiera_s.yaml"
+            
+        # Stateful memory for real-time tracking
+        self.active_tracks = []
+        self.lost_tracks = []
+        self.next_track_id = 1
+        self.last_video_id = None
 
     # ── Single-frame detection (for images + legacy fallback) ────────────
 
     def detect_and_track(self, frame: Image.Image, query: str,
                          return_all_detections: bool = False) -> List[Dict]:
-        """Single-frame detection via Grounding DINO.  verify=False for speed."""
+        """Stateful single-frame detection and tracking."""
         clean_q = _clean_query_for_gdino(query)
+        
+        # threshold 0.25 is more lenient for real-time
+        detections = self.detection_service.detect_multiple(
+            frame, clean_q, threshold=0.25, verify=False
+        )
+        # Limit to top 3
+        detections = detections[:3]
+        
+        current_tracks = []
+        matched_det_indices = set()
+        
+        # 1. Match active tracks
+        for active_t in self.active_tracks:
+            best_iou, best_idx = 0.25, -1
+            for i, det in enumerate(detections):
+                if i in matched_det_indices: continue
+                boxA, boxB = active_t["bbox"], det["box"]
+                xA, yA = max(boxA[0], boxB[0]), max(boxA[1], boxB[1])
+                xB, yB = min(boxA[2], boxB[2]), min(boxA[3], boxB[3])
+                inter = max(0, xB - xA) * max(0, yB - yA)
+                if inter > 0:
+                    areaA = (boxA[2]-boxA[0]) * (boxA[3]-boxA[1])
+                    areaB = (boxB[2]-boxB[0]) * (boxB[3]-boxB[1])
+                    iou = inter / float(areaA + areaB - inter + 1e-6)
+                    if iou > best_iou:
+                        best_iou, best_idx = iou, i
+            if best_idx != -1:
+                matched_det_indices.add(best_idx)
+                current_tracks.append({"track_id": active_t["track_id"], "bbox": detections[best_idx]["box"], "score": detections[best_idx]["score"]})
 
-        if return_all_detections:
-            detections = self.detection_service.detect_multiple(
-                frame, clean_q, threshold=0.25, verify=False
-            )
-            return [
-                {"track_id": i + 1, "bbox": d["box"], "score": d["score"]}
-                for i, d in enumerate(detections)
-            ]
-        result = self.detection_service.detect(frame, clean_q, verify=False)
-        if result and result["score"] >= 0.15:
-            return [{"track_id": 1, "bbox": result["box"], "score": result["score"]}]
-        return []
+        # 2. Recovery from lost
+        new_lost = []
+        for lost_t in self.lost_tracks:
+            if lost_t.get("age", 0) > 10: continue # Keep lost for ~10 frames in real-time
+            best_iou, best_idx = 0.15, -1
+            for i, det in enumerate(detections):
+                if i in matched_det_indices: continue
+                boxA, boxB = lost_t["bbox"], det["box"]
+                xA, yA = max(boxA[0], boxB[0]), max(boxA[1], boxB[1])
+                xB, yB = min(boxA[2], boxB[2]), min(boxA[3], boxB[3])
+                inter = max(0, xB - xA) * max(0, yB - yA)
+                if inter > 0:
+                    areaA = (boxA[2]-boxA[0]) * (boxA[3]-boxA[1])
+                    areaB = (boxB[2]-boxB[0]) * (boxB[3]-boxB[1])
+                    iou = inter / float(areaA + areaB - inter + 1e-6)
+                    if iou > best_iou:
+                        best_iou, best_idx = iou, i
+            if best_idx != -1:
+                matched_det_indices.add(best_idx)
+                current_tracks.append({"track_id": lost_t["track_id"], "bbox": detections[best_idx]["box"], "score": detections[best_idx]["score"]})
+            else:
+                lost_t["age"] = lost_t.get("age", 0) + 1
+                new_lost.append(lost_t)
+
+        # 3. Demote unmatched active to lost
+        matched_ids = {t["track_id"] for t in current_tracks}
+        for active_t in self.active_tracks:
+            if active_t["track_id"] not in matched_ids:
+                active_t["age"] = 1
+                new_lost.append(active_t)
+
+        # 4. New tracks
+        for i, det in enumerate(detections):
+            if i not in matched_det_indices and det["score"] >= 0.40:
+                current_tracks.append({"track_id": self.next_track_id, "bbox": det["box"], "score": det["score"]})
+                self.next_track_id += 1
+                
+        self.active_tracks = current_tracks
+        self.lost_tracks = new_lost
+        return current_tracks
 
     def reset_for_new_video(self, video_id: str, query: str):
-        """No-op — kept for API compatibility."""
-        pass
+        """Resets tracking state if we've switched videos or queries."""
+        if video_id != self.last_video_id:
+            self.active_tracks = []
+            self.lost_tracks = []
+            self.next_track_id = 1
+            self.last_video_id = video_id
 
     # ── Video preloading (the core new feature) ──────────────────────────
 
@@ -155,10 +222,11 @@ class TrackingService:
         keyframes = []
         next_track_id = 1
         active_tracks = [] # list of obj: {"track_id": 1, "bbox": [..]}
+        lost_tracks = []   # Tracks not seen in current frame, but kept for recovery
 
         for timestamp, pil_frame in frames:
             detections = self.detection_service.detect_multiple(
-                pil_frame, clean_q, threshold=0.35, verify=False
+                pil_frame, clean_q, threshold=0.25, verify=False
             )
             
             # Limit to top 3 detections per frame to prevent noise
@@ -166,47 +234,78 @@ class TrackingService:
             
             # Simple IoU tracker
             current_tracks = []
-            
-            # 1. Try to match each previous track to a new detection
             matched_det_indices = set()
-            for prev_t in active_tracks:
-                best_iou = 0.20 # IoU Threshold
+            
+            # 1. Try to match each ACTIVE track to a new detection (IoU)
+            for active_t in active_tracks:
+                best_iou = 0.25
                 best_det_idx = -1
-                
                 for i, det in enumerate(detections):
-                    if i in matched_det_indices:
-                        continue
+                    if i in matched_det_indices: continue
                     
-                    # Calculate IoU
-                    boxA = prev_t["bbox"]
-                    boxB = det["box"]
-                    xA = max(boxA[0], boxB[0])
-                    yA = max(boxA[1], boxB[1])
-                    xB = min(boxA[2], boxB[2])
-                    yB = min(boxA[3], boxB[3])
-
-                    interArea = max(0, xB - xA) * max(0, yB - yA)
-                    if interArea > 0:
-                        boxAArea = max(0, boxA[2] - boxA[0]) * max(0, boxA[3] - boxA[1])
-                        boxBArea = max(0, boxB[2] - boxB[0]) * max(0, boxB[3] - boxB[1])
-                        iou = interArea / float(boxAArea + boxBArea - interArea + 1e-6)
-                    else:
-                        iou = 0.0
-
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_det_idx = i
-                        
+                    boxA, boxB = active_t["bbox"], det["box"]
+                    xA, yA = max(boxA[0], boxB[0]), max(boxA[1], boxB[1])
+                    xB, yB = min(boxA[2], boxB[2]), min(boxA[3], boxB[3])
+                    inter = max(0, xB - xA) * max(0, yB - yA)
+                    if inter > 0:
+                        areaA = (boxA[2]-boxA[0]) * (boxA[3]-boxA[1])
+                        areaB = (boxB[2]-boxB[0]) * (boxB[3]-boxB[1])
+                        iou = inter / float(areaA + areaB - inter + 1e-6)
+                        if iou > best_iou:
+                            best_iou, best_det_idx = iou, i
+                
                 if best_det_idx != -1:
                     matched_det_indices.add(best_det_idx)
                     current_tracks.append({
-                        "track_id": prev_t["track_id"],
+                        "track_id": active_t["track_id"],
                         "bbox": detections[best_det_idx]["box"],
                         "score": detections[best_det_idx]["score"]
                     })
-                    
-            # 2. Assign new track IDs ONLY for high-confidence unmatched detections
-            # This prevents random weak detections from spawning new tracks
+            
+            # 2. Recovery: Try to match LOST tracks to remaining detections
+            # This handles objects reappearing after occlusion
+            new_lost_tracks = []
+            for lost_t in lost_tracks:
+                # If track has been lost for more than 4 sample frames (~4s), drop it
+                if lost_t.get("age", 0) > 4:
+                    continue
+                
+                best_iou = 0.15 # Lower threshold for recovery
+                best_det_idx = -1
+                for i, det in enumerate(detections):
+                    if i in matched_det_indices: continue
+                    # (Standard IoU calculation...)
+                    boxA, boxB = lost_t["bbox"], det["box"]
+                    xA, yA = max(boxA[0], boxB[0]), max(boxA[1], boxB[1])
+                    xB, yB = min(boxA[2], boxB[2]), min(boxA[3], boxB[3])
+                    inter = max(0, xB - xA) * max(0, yB - yA)
+                    if inter > 0:
+                        areaA = (boxA[2]-boxA[0]) * (boxA[3]-boxA[1])
+                        areaB = (boxB[2]-boxB[0]) * (boxB[3]-boxB[1])
+                        iou = inter / float(areaA + areaB - inter + 1e-6)
+                        if iou > best_iou:
+                            best_iou, best_det_idx = iou, i
+                
+                if best_det_idx != -1:
+                    matched_det_indices.add(best_det_idx)
+                    current_tracks.append({
+                        "track_id": lost_t["track_id"],
+                        "bbox": detections[best_det_idx]["box"],
+                        "score": detections[best_det_idx]["score"]
+                    })
+                else:
+                    # Still lost, increment age and keep in buffer
+                    lost_t["age"] = lost_t.get("age", 0) + 1
+                    new_lost_tracks.append(lost_t)
+
+            # 3. Handle unmatched active tracks (move them to lost)
+            matched_ids = {t["track_id"] for t in current_tracks}
+            for active_t in active_tracks:
+                if active_t["track_id"] not in matched_ids:
+                    active_t["age"] = 1
+                    new_lost_tracks.append(active_t)
+
+            # 4. Handle new detections (spawn new track)
             for i, det in enumerate(detections):
                 if i not in matched_det_indices and det["score"] >= 0.40:
                     current_tracks.append({
@@ -217,6 +316,7 @@ class TrackingService:
                     next_track_id += 1
             
             active_tracks = current_tracks
+            lost_tracks = new_lost_tracks
             keyframes.append({"time": round(timestamp, 3), "tracks": current_tracks})
 
         elapsed = time.time() - t0

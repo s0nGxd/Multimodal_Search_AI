@@ -41,7 +41,14 @@ class DetectionService:
                verify: bool = False):
         """Returns the single highest-confidence box for the query phrase."""
         text = self._query_to_text(query)
-        self.yolo_world.set_classes([text])
+        
+        # Distractor classes prevent hallucination
+        distractors = ["car", "truck", "person", "dog", "bus", "bicycle", "motorcycle"]
+        # Only add distractors that are NOT substrings of the query
+        # E.g. if query="red car", "car" is NOT a distractor.
+        filtered_distractors = [d for d in distractors if d not in text]
+        all_classes = [text] + filtered_distractors
+        self.yolo_world.set_classes(all_classes)
         
         # Run YOLO-World
         results = self.yolo_world(image, conf=threshold, verbose=False)
@@ -51,10 +58,17 @@ class DetectionService:
             
         boxes = results[0].boxes
         
-        # Get the highest confidence box
-        best_idx = torch.argmax(boxes.conf).item()
-        raw_box = boxes.xyxy[best_idx].tolist()
-        score = boxes.conf[best_idx].item()
+        # Filter for target class (index 0)
+        target_indices = (boxes.cls == 0).nonzero()
+        if len(target_indices) == 0:
+            return None
+            
+        # Get the highest confidence box for target class
+        target_confs = boxes.conf[target_indices.squeeze(-1)]
+        best_target_idx = target_indices[torch.argmax(target_confs)].item()
+        
+        raw_box = boxes.xyxy[best_target_idx].tolist()
+        score = boxes.conf[best_target_idx].item()
         
         # Crop verification — only for static images
         if verify and not self._verify_crop(image, raw_box, query):
@@ -79,7 +93,14 @@ class DetectionService:
                         threshold: float = 0.30, verify: bool = False):
         """Returns all boxes above threshold using YOLO-World."""
         text = self._query_to_text(query)
-        self.yolo_world.set_classes([text])
+        
+        # Distractor classes prevent hallucination
+        distractors = ["car", "truck", "person", "dog", "bus", "bicycle", "motorcycle"]
+        # Only add distractors that are NOT substrings of the query
+        # E.g. if query="red car", "car" is NOT a distractor.
+        filtered_distractors = [d for d in distractors if d not in text]
+        all_classes = [text] + filtered_distractors
+        self.yolo_world.set_classes(all_classes)
         
         # Run YOLO-World
         results = self.yolo_world(image, conf=threshold, verbose=False)
@@ -93,6 +114,10 @@ class DetectionService:
         width, height = image.size
         
         for i in range(len(boxes)):
+            cls_id = int(boxes.cls[i].item())
+            if cls_id != 0: # Skip distractors
+                continue
+                
             raw_box = boxes.xyxy[i].tolist()
             score = boxes.conf[i].item()
 

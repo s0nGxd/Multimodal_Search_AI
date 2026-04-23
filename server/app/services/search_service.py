@@ -152,18 +152,7 @@ class SearchService:
 
     @staticmethod
     def _description_match_score(query: str, description: str) -> tuple[float, float]:
-        """Score how well the stored description confirms the query object.
-
-        Uses a two-tier approach:
-          1. PRIMARY NOUN match: Does the description mention the core object?
-             This is the decisive filter — pass or fail.
-          2. ADJECTIVE match: Among confirmed objects, do the adjectives match?
-             This is a ranking bonus, not a filter.
-
-        Returns (noun_score, adjective_bonus) where:
-          noun_score:       0.0 (no match) or 0.85–1.0 (confirmed)
-          adjective_bonus:  0.0–0.10 (how many adjectives also match)
-        """
+        """Score how well the stored description confirms the query object."""
         desc = description.lower()
         q = query.strip().lower()
 
@@ -172,29 +161,58 @@ class SearchService:
         if not nouns:
             return (0.0, 0.0)
 
-        # Check whole-word matches only ('dog' must not match 'hotdog')
+        # Check whole-word matches only
         noun_hits = sum(1 for n in nouns if re.search(r'\b' + re.escape(n) + r'\b', desc))
         noun_ratio = noun_hits / len(nouns)
 
         if noun_ratio <= 0:
             return (0.0, 0.0)
 
-        # Full phrase match is best
-        if re.search(r'\b' + re.escape(q) + r'\b', desc):
-            noun_score = 1.0
-        elif noun_ratio >= 1.0:
-            noun_score = 0.92       # all nouns present, different order
-        else:
-            noun_score = 0.85       # at least one core noun confirmed
-
-        # ── Adjective matching (RANKING bonus only) ───────────────────
+        # ── Adjective matching (RANKING & PENALTY logic) ──────────────
         adjectives = _extract_adjectives(q)
+        adjective_bonus = 0.0
+        
         if adjectives:
+            # Check for matches
             adj_hits = sum(1 for a in adjectives
                            if re.search(r'\b' + re.escape(a) + r'\b', desc))
-            adjective_bonus = (adj_hits / len(adjectives)) * 0.07
+            
+            # If some adjectives matched, calculate bonus
+            if adj_hits > 0:
+                adjective_bonus = (adj_hits / len(adjectives)) * 0.08
+            
+            # ── COLOR CONFLICT PENALTY ──
+            colors = {
+                'red', 'blue', 'green', 'yellow', 'black', 'white', 'brown', 
+                'orange', 'purple', 'pink', 'grey', 'gray', 'golden', 'silver'
+            }
+            query_colors = set(adjectives) & colors
+            if query_colors:
+                desc_words = set(re.findall(r'\b\w+\b', desc))
+                desc_colors = desc_words & colors
+                
+                if query_colors & desc_colors:
+                    # Great! The requested color is mentioned.
+                    noun_base = 0.85
+                elif desc_colors:
+                    # A DIFFERENT color is mentioned, and ours is NOT. Conflict!
+                    # Return 0.0 so we can fallback to region_desc scoring.
+                    return (0.0, 0.0)
+                else:
+                    # No color mentioned at all.
+                    noun_base = 0.70
+            else:
+                noun_base = 0.85
         else:
-            adjective_bonus = 0.0
+            noun_base = 0.85
+
+        # Final noun_score calculation
+        if re.search(r'\b' + re.escape(q) + r'\b', desc):
+            noun_score = noun_base + 0.14 # e.g. 0.99
+        elif noun_ratio >= 1.0:
+            noun_score = noun_base + 0.07 # e.g. 0.92
+        else:
+            noun_score = noun_base        # e.g. 0.85
 
         return (noun_score, adjective_bonus)
 
@@ -318,7 +336,16 @@ class SearchService:
         
         for parent_pid, region_info in parent_region_info.items():
             if parent_pid not in best_row:
-                continue
+                try:
+                    parent_df = self.table.search().where(f"photo_id = '{parent_pid}'").limit(1).to_pandas()
+                    if not parent_df.empty:
+                        best_row[parent_pid] = parent_df.iloc[0].to_dict()
+                        best_row[parent_pid]["_distance"] = 1.0 
+                    else:
+                        continue
+                except Exception:
+                    continue
+
             if region_info.get("bbox"):
                 best_row[parent_pid]["_f2_box"] = region_info["bbox"]
             if region_info.get("description"):
@@ -352,7 +379,7 @@ class SearchService:
             visual_sim = max(0.0, 1.0 - float(row.get("_distance", 1.0)))
 
             if noun_score > 0:
-                combined = 0.82 + adj_bonus + (visual_sim * 0.15)
+                combined = noun_score + adj_bonus + (visual_sim * 0.15)
             else:
                 combined = visual_sim * 0.25
 
@@ -385,9 +412,14 @@ class SearchService:
                     img.thumbnail((800, 800))
                     grounding = caption_service.ground_phrase(img, query)
                     best_row[pid]["_verified"] = grounding["found"]
-                    best_row[pid]["_f2_box"] = grounding["box"]
+                    
+                    # CRITICAL FIX: Only use Florence-2 box if we don't already have one.
+                    # This prevents DeepSearch from overwriting perfect YOLO regions.
                     if grounding["found"]:
+                        if not best_row[pid].get("_f2_box"):
+                            best_row[pid]["_f2_box"] = grounding["box"]
                         best_row[pid]["_combined_score"] = min(0.99, best_row[pid]["_combined_score"] + 0.03)
+                        
                     log_debug(f"    PID {pid}: found={grounding['found']}, box={grounding['box']}")
                 except Exception as e:
                     log_debug(f"    PID {pid}: Deep Search ERROR: {e}")

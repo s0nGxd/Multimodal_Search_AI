@@ -95,24 +95,7 @@ class CaptionService:
 
     @torch.no_grad()
     def ground_phrase(self, image: Image.Image, phrase: str) -> dict:
-        """Verify whether *phrase* can be physically located in *image*.
-
-        Uses Florence-2 CAPTION_TO_PHRASE_GROUNDING — the model reads the phrase as a
-        natural-language query (e.g. "brown dog running on grass") and tries to produce a
-        bounding box that exactly matches it.  Unlike Grounding DINO, Florence-2 is a
-        generative model that understands the *full semantic meaning* of the phrase rather
-        than decomposing it into token matches, giving it far superior adjective + action +
-        object comprehension.
-
-        Returns
-        -------
-        dict with keys:
-          - "found"  : bool   — True if at least one box was grounded
-          - "score"  : float  — confidence 0.0–1.0 (0.0 if not found)
-          - "box"    : list[float] | None  — normalized [x1, y1, x2, y2] of best box
-
-        Latency: ~2–4 s per image on GPU.  Cap callers to 8 images max (~30 s total).
-        """
+        """Verify whether *phrase* can be physically located in *image*."""
         self._ensure_loaded()
         if image.mode != "RGB":
             image = image.convert("RGB")
@@ -136,22 +119,38 @@ class CaptionService:
         if not bboxes:
             return {"found": False, "score": 0.0, "box": None}
 
-        # Look for the label that best matches the phrase — pick the first grounded box
-        # (Florence-2 grounding outputs are naturally ordered by relevance)
+        # Look for the label that best matches the phrase
+        from app.services.search_service import _extract_nouns
         w, h = image.size
         best_box = None
         best_score = 0.0
         phrase_lower = phrase.lower()
+        phrase_words = set(phrase_lower.split())
+        phrase_nouns = _extract_nouns(phrase_lower)
 
         for i, (box, label) in enumerate(zip(bboxes, labels)):
             label_lower = str(label).lower()
-            # Simple word overlap score — how much of the phrase appears in the label
-            phrase_words = set(phrase_lower.split())
             label_words = set(label_lower.split())
+            
+            # CRITICAL SAFETY: If we extracted nouns (e.g. 'bus'), 
+            # ensure at least one target noun is present in the grounded label.
+            # This stops Florence-2 from 'successfully' grounding a bus onto a car.
+            noun_match = any(n in label_lower for n in phrase_nouns) if phrase_nouns else True
+            if not noun_match:
+                continue
+
+            # Semantic overlap score
             overlap = len(phrase_words & label_words) / max(len(phrase_words), 1)
+            
+            # If the label is extremely generic (like just 'dog' when searching 'black dog'),
+            # we still give it a decent score if it's the only box found.
+            # This handles cases where grounding works but label generation is lazy.
+            if overlap == 0 and len(bboxes) == 1:
+                overlap = 0.5
+            
             # Earlier boxes score slightly higher (Florence orders by confidence)
             position_bonus = max(0.0, 0.1 - i * 0.01)
-            score = min(1.0, 0.60 + (overlap * 0.35) + position_bonus)
+            score = min(1.0, 0.50 + (overlap * 0.40) + position_bonus)
 
             if score > best_score:
                 best_score = score
@@ -160,6 +159,10 @@ class CaptionService:
                 best_box = [x1 / w, y1 / h, x2 / w, y2 / h]
 
         if best_box is None:
+            return {"found": False, "score": 0.0, "box": None}
+
+        # If score is very low, we treat it as not found
+        if best_score < 0.45:
             return {"found": False, "score": 0.0, "box": None}
 
         return {"found": True, "score": best_score, "box": best_box}
