@@ -151,11 +151,13 @@ class SearchService:
             return []
 
         # Calibrated for pure SigLIP cross-modal (no caption_vector).
-        # SigLIP single-query text-image cosine sim runs narrower than CLIP
-        # (roughly 0.00..0.20). Floor at 0 so any positive match is visible;
-        # detection boost handles lifting confident matches into the 50-90% band.
+        # SigLIP single-query text-image cosine sim on this model+dataset
+        # tops out around 0.06-0.10 for genuine matches. SIM_CEIL=0.10 maps
+        # a strong bare-SigLIP match to ~100% before re-rank. Detection
+        # boost still exists but is no longer load-bearing for perceived
+        # confidence on hard queries where OWL-ViT gives weak signals.
         SIM_FLOOR = 0.00
-        SIM_CEIL = 0.20
+        SIM_CEIL = 0.10
 
         def rescale_dist(dist: float) -> float:
             raw_sim = 1.0 - dist

@@ -12,7 +12,7 @@ export default function Home() {
     const [loading, setLoading] = useState(false);
     const [hasSearched, setHasSearched] = useState(false);
     const [resultCount, setResultCount] = useState(20);
-    const [minSimilarity, setMinSimilarity] = useState(0.8);
+    const [minSimilarity, setMinSimilarity] = useState(0.25);
     const [showSettings, setShowSettings] = useState(false);
     const [focusedImage, setFocusedImage] = useState<SearchResult | null>(null);
     const [bboxes, setBboxes] = useState<TrackResult[]>([]);
