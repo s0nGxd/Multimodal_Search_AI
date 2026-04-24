@@ -169,22 +169,22 @@ class SearchService:
             elif score > 0.05:
                 rrf_scores[pid] += (score * 2.0)
 
-        # Knob 1: trim to top 8 for OWL-ViT re-rank.
-        top_candidates = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)[:8]
+        # Knob 1: trim to top 5 for OWL-ViT re-rank. On HF cpu-basic each
+        # OWL-ViT forward pass is ~700-900ms, so cutting 15 -> 5 buys ~7s.
+        top_candidates = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)[:5]
 
         from app.services.detection_service import detection_service
         import os
         from PIL import Image
 
         # Knob 2: skip re-rank on candidates where SigLIP is already confident
-        # (rescaled >= 0.65, i.e. raw cosine sim >= ~0.13).
-        # Collect candidates that still need OWL-ViT.
-        pending: list[tuple[str, Image.Image]] = []
+        # (rescaled >= 0.65, i.e. raw cosine sim >= ~0.13). Saves a full
+        # OWL-ViT forward pass per skip.
         for pid in top_candidates:
             row = best_row[pid]
             row_dist = float(row.get("_distance", 1.0))
             if rescale_dist(row_dist) >= 0.65:
-                continue  # SigLIP already confident; skip expensive re-rank
+                continue
             url = row.get("photo_image_url", "")
             if "/images/" not in url:
                 continue
@@ -195,49 +195,11 @@ class SearchService:
             try:
                 img = Image.open(local_path).convert("RGB")
                 img.thumbnail((768, 768))
-                pending.append((pid, img))
+                det = detection_service.detect(img, query)
+                if det:
+                    _apply_det_boost(pid, det.get("score", 0))
             except Exception:
                 continue
-
-        # Knob 3: batched OWL-ViT forward pass across all pending candidates.
-        if pending:
-            batched_ok = False
-            try:
-                proc = detection_service.processor
-                det_model = detection_service.model
-                det_device = detection_service.device
-                images = [img for _, img in pending]
-                per_image_texts = [f"a photo of a {query}", f"{query}", f"a {query}"]
-                texts = [per_image_texts for _ in images]
-                inputs = proc(text=texts, images=images, return_tensors="pt", padding=True).to(det_device)
-                with torch.no_grad():
-                    outputs = det_model(**inputs)
-                target_sizes = torch.tensor(
-                    [[img.size[1], img.size[0]] for img in images]
-                ).to(det_device)
-                results = proc.image_processor.post_process_object_detection(
-                    outputs=outputs, target_sizes=target_sizes, threshold=0.05
-                )
-                for idx, (pid, _img) in enumerate(pending):
-                    scores = results[idx]["scores"]
-                    if len(scores) == 0:
-                        continue
-                    best_idx = scores.argmax().item()
-                    score = float(scores[best_idx].item())
-                    _apply_det_boost(pid, score)
-                batched_ok = True
-            except Exception as e:
-                print(f"Batched OWL-ViT re-rank failed, falling back per-candidate: {e}")
-
-            if not batched_ok:
-                # Fallback: original per-candidate loop for pending entries.
-                for pid, img in pending:
-                    try:
-                        det = detection_service.detect(img, query)
-                        if det:
-                            _apply_det_boost(pid, det.get("score", 0))
-                    except Exception:
-                        pass
 
         sorted_pids = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)
 
