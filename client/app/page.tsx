@@ -241,13 +241,10 @@ export default function Home() {
             // Falls back to the full query if parse produced nothing useful.
             const firstPositive = plan.clauses.find(c => !c.negated);
             setDetectionPhrase(firstPositive?.object?.trim() || query.trim());
-            // Only route to /search/complex when the plan actually needs boolean
-            // combination or negation. SINGLE-mode queries go straight to /search
-            // with the raw query — SigLIP handles the natural phrase better than
-            // a reassembled "{attributes} {object}" string.
             const isStructured =
                 plan.mode !== 'SINGLE'
-                || plan.clauses.some(c => c.negated);
+                || plan.clauses.some(c => c.negated)
+                || plan.clauses.some(c => c.attributes && c.attributes.length > 0);
             const raw = isStructured
                 ? await searchComplex(plan, resultCount, threshold)
                 : await searchImages(query, resultCount, threshold);
@@ -286,19 +283,7 @@ export default function Home() {
                     return true;
                 });
                 filtered.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-                // Dedupe videos: multiple frames of the same video came through so
-                // VLM could pick the best; keep the highest-scored frame per video.
-                const seenVideos = new Set<string>();
-                const deduped: SearchResult[] = [];
-                for (const r of filtered) {
-                    const v = r.video_url;
-                    if (v) {
-                        if (seenVideos.has(v)) continue;
-                        seenVideos.add(v);
-                    }
-                    deduped.push(r);
-                }
-                finalResults = [...deduped, ...tail];
+                finalResults = [...filtered, ...tail];
             }
 
             setResults(finalResults);

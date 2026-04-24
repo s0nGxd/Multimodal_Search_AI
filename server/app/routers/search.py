@@ -221,7 +221,6 @@ def search_complex(req: ComplexSearchRequest):
                 boost_weight=0.95 if has_attrs else 0.80,
                 rerank_top=3 if has_attrs else 5,
                 rerank_size=512,
-                dedup_videos=False,
             )
             _cache_put(cache_key, rows)
             return rows
@@ -289,9 +288,7 @@ def search_complex(req: ComplexSearchRequest):
 @router.post("/search", response_model=List[SearchResult])
 def search_images(req: SearchRequest):
     try:
-        # VLM re-rank downstream needs multiple frames per video so it can
-        # pick the actual action moment. Frontend dedups after VLM scoring.
-        results = search_service.search(req.query, req.k, req.threshold, dedup_videos=False)
+        results = search_service.search(req.query, req.k, req.threshold)
         response = []
         for r in results:
             score = float(r.get("similarity_score", 0.0))

@@ -107,7 +107,6 @@ class SearchService:
         boost_weight: float = 0.80,
         rerank_top: int = 5,
         rerank_size: int = 768,
-        dedup_videos: bool = True,
     ) -> list[dict]:
         """SigLIP image-vector search with OWL-ViT detection re-ranking.
 
@@ -133,23 +132,16 @@ class SearchService:
         select_cols = ["photo_id", "photo_image_url", "video_url", "timestamp"]
         ranked_lists = []
 
-        # Wider net (k * 4) so we have enough candidates even after dropping
-        # broken-vector rows (distance >= 1.0 means raw cosine sim <= 0, which
-        # is a sign of corrupted/zero vectors from a botched ingestion).
+        # Wider net (k * 2) so we have enough candidates before filtering via threshold.
         try:
             df = (
                 self.table.search(query_vec, vector_column_name="vector")
                 .metric("cosine")
-                .limit(k * 4)
+                .limit(k * 2)
                 .select(select_cols)
                 .to_pandas()
             )
-            # Drop broken-vector rows: real SigLIP matches have cosine sim > 0,
-            # i.e. _distance < 1.0. Corrupted rows come back with dist ~1.0+.
-            if "_distance" in df.columns:
-                df = df[df["_distance"] < 0.98].reset_index(drop=True)
-            # Cap to k*2 after filtering.
-            df = df.head(k * 2)
+            # LanceDB auto-injects _distance after .search(); don't select it explicitly.
             ranked_lists.append(df)
         except Exception as e:
             print(f"Image vector search failed: {e}")
@@ -236,9 +228,9 @@ class SearchService:
             row = best_row[pid].copy()
             v_url = row.get("video_url", "")
 
-            if dedup_videos and v_url and v_url in seen_videos:
+            if v_url and v_url in seen_videos:
                 continue
-            if dedup_videos and v_url:
+            if v_url:
                 seen_videos.add(v_url)
 
             dist = float(row.get("_distance", 1.0))

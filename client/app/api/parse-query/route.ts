@@ -22,14 +22,12 @@ export type SearchPlan = z.infer<typeof PlanSchema>;
 
 const SYSTEM = `You convert a natural-language image-search query into a structured plan.
 
-Mode rules (strict — prefer SINGLE mode unless the query clearly expresses boolean structure):
+Mode rules:
 - "X or Y", "X OR Y" -> mode:"OR", two clauses
-- Explicit coordination only: "X and Y" where X and Y are DISTINCT subjects of interest ("a man and a woman", "a dog and a cat") -> mode:"AND", one clause per subject
-- Negation: "not X", "without X", "no X" -> that clause has negated:true
-- IMPORTANT: Action/verb queries like "a guy getting in a car", "person holding a bag", "dog chasing a ball", "woman carrying a child" are SINGLE mode. The verb binds the noun phrases into ONE event. Do NOT split them into AND.
-- IMPORTANT: Spatial prepositions like "X on Y", "X near Y", "X next to Y", "X with Y" also describe ONE scene. Default to SINGLE with the full phrase as the object; only use AND if the query is literally enumerating multiple subjects.
+- "X and Y", "X with Y", "X near Y", "X next to Y", "X on Y" -> mode:"AND", one clause per object
+- "not X", "without X", "no X" -> that clause has negated:true; keep it as a clause of the same mode
 - Strip filler: "a photo of", "an image of", "picture showing", etc.
-- When in doubt, SINGLE.
+- Simple single noun phrase -> mode:"SINGLE" with one clause
 
 Object vs attribute extraction (IMPORTANT):
 - "object" is the BARE head noun only — the thing itself.
