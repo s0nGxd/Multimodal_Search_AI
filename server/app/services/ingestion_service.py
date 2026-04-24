@@ -29,9 +29,15 @@ class ImageRecord(LanceModel):
     vector: Vector(EMBED_DIM)
 
 
-def _download_image(photo_id: str, url: str, timeout: int = 10) -> tuple[str, str, Image.Image | None]:
+_DL_HEADERS = {
+    "User-Agent": "SEMANTIX-Ingest/1.0 (academic; aarizsajan2@gmail.com)",
+    "Accept": "image/*,*/*;q=0.8",
+}
+
+
+def _download_image(photo_id: str, url: str, timeout: int = 15) -> tuple[str, str, Image.Image | None]:
     try:
-        response = requests.get(url, timeout=timeout)
+        response = requests.get(url, timeout=timeout, headers=_DL_HEADERS)
         response.raise_for_status()
         img = Image.open(io.BytesIO(response.content)).convert("RGB")
         return (photo_id, url, img)
@@ -175,14 +181,24 @@ class IngestionService:
         sync_to_repo()
         return {"id": pid, "url": url, "status": "indexed"}
 
-    def process_bulk_csv(self, csv_path: str, limit: int = 100, max_workers: int = 8, batch_size: int = 16):
+    def process_bulk_csv(self, csv_path: str, limit: int = 100, max_workers: int = 3, batch_size: int = 16, offset: int = 0):
         try:
-            df = pd.read_csv(csv_path, sep='\t', nrows=limit)
+            df = pd.read_csv(csv_path, sep='\t', skiprows=range(1, offset + 1) if offset else None, nrows=limit)
         except Exception as e:
             raise ValueError(f"Failed to read CSV: {e}")
 
-        # Phase 1: Download images concurrently
-        print(f"Downloading up to {len(df)} images with {max_workers} threads...")
+        existing_ids: set[str] = set()
+        if search_service.table is not None:
+            try:
+                existing_ids = set(search_service.table.to_pandas()['photo_id'].astype(str).tolist())
+            except Exception:
+                existing_ids = set()
+        df = df[~df['photo_id'].astype(str).isin(existing_ids)].reset_index(drop=True)
+        if df.empty:
+            return {"processed": 0, "skipped_existing": True, "status": "completed"}
+
+        # Phase 1: Download images concurrently (low concurrency to be polite to upstream)
+        print(f"Downloading {len(df)} images with {max_workers} threads (offset={offset})...")
         downloaded = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {

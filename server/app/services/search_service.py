@@ -98,12 +98,30 @@ class SearchService:
             all_vectors.extend([vectors[j] for j in range(len(batch))])
         return all_vectors
 
-    def search(self, query: str, k: int = 20, threshold: float = 0.20) -> list[dict]:
+    def search(
+        self,
+        query: str,
+        k: int = 20,
+        threshold: float = 0.20,
+        force_rerank: bool = False,
+        boost_weight: float = 0.80,
+        rerank_top: int = 5,
+        rerank_size: int = 768,
+        dedup_videos: bool = True,
+    ) -> list[dict]:
         """SigLIP image-vector search with OWL-ViT detection re-ranking.
 
         The query is embedded using a 'a photo of {query}' prompt template for
         improved SigLIP accuracy. Top candidates are then re-ranked by
         OWL-ViT detection confidence on the same query phrase.
+
+        force_rerank: if True, bypass the SigLIP-confident skip and run OWL-ViT
+        on every top candidate. Used for attribute-heavy clauses where SigLIP
+        is unreliable at binding attributes to objects.
+
+        boost_weight: fraction of the gap (1 - final_sim) that a confident
+        detection closes. Default 0.80; raise to ~0.95 for attribute clauses
+        so OWL-ViT evidence dominates.
         """
         if self.table is None:
             self.refresh_table()
@@ -115,16 +133,23 @@ class SearchService:
         select_cols = ["photo_id", "photo_image_url", "video_url", "timestamp"]
         ranked_lists = []
 
-        # Wider net (k * 2) so we have enough candidates before filtering via threshold.
+        # Wider net (k * 4) so we have enough candidates even after dropping
+        # broken-vector rows (distance >= 1.0 means raw cosine sim <= 0, which
+        # is a sign of corrupted/zero vectors from a botched ingestion).
         try:
             df = (
                 self.table.search(query_vec, vector_column_name="vector")
                 .metric("cosine")
-                .limit(k * 2)
+                .limit(k * 4)
                 .select(select_cols)
                 .to_pandas()
             )
-            # LanceDB auto-injects _distance after .search(); don't select it explicitly.
+            # Drop broken-vector rows: real SigLIP matches have cosine sim > 0,
+            # i.e. _distance < 1.0. Corrupted rows come back with dist ~1.0+.
+            if "_distance" in df.columns:
+                df = df[df["_distance"] < 0.98].reset_index(drop=True)
+            # Cap to k*2 after filtering.
+            df = df.head(k * 2)
             ranked_lists.append(df)
         except Exception as e:
             print(f"Image vector search failed: {e}")
@@ -171,9 +196,9 @@ class SearchService:
             elif score > 0.05:
                 rrf_scores[pid] += (score * 2.0)
 
-        # Knob 1: trim to top 5 for OWL-ViT re-rank. On HF cpu-basic each
-        # OWL-ViT forward pass is ~700-900ms, so cutting 15 -> 5 buys ~7s.
-        top_candidates = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)[:5]
+        # Knob 1: trim to top-N for OWL-ViT re-rank. On HF cpu-basic each
+        # OWL-ViT forward pass is ~700-900ms at 768px; demo-mode uses N=3 @ 512px.
+        top_candidates = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)[:rerank_top]
 
         from app.services.detection_service import detection_service
         import os
@@ -185,7 +210,7 @@ class SearchService:
         for pid in top_candidates:
             row = best_row[pid]
             row_dist = float(row.get("_distance", 1.0))
-            if rescale_dist(row_dist) >= 0.65:
+            if not force_rerank and rescale_dist(row_dist) >= 0.65:
                 continue
             url = row.get("photo_image_url", "")
             if "/images/" not in url:
@@ -196,7 +221,7 @@ class SearchService:
                 continue
             try:
                 img = Image.open(local_path).convert("RGB")
-                img.thumbnail((768, 768))
+                img.thumbnail((rerank_size, rerank_size))
                 det = detection_service.detect(img, query)
                 if det:
                     _apply_det_boost(pid, det.get("score", 0))
@@ -211,9 +236,9 @@ class SearchService:
             row = best_row[pid].copy()
             v_url = row.get("video_url", "")
 
-            if v_url and v_url in seen_videos:
+            if dedup_videos and v_url and v_url in seen_videos:
                 continue
-            if v_url:
+            if dedup_videos and v_url:
                 seen_videos.add(v_url)
 
             dist = float(row.get("_distance", 1.0))
@@ -222,9 +247,9 @@ class SearchService:
             # 1. Base score from SigLIP (cross-modal similarity, rescaled to 0..1)
             final_sim = rescale_dist(dist)
 
-            # 2. OWL-ViT detection re-rank — close 80% of the gap weighted by confidence
+            # 2. OWL-ViT detection re-rank — close `boost_weight` of the gap weighted by confidence
             if det_score > 0.10:
-                final_sim += (1.0 - final_sim) * (0.80 * det_score)
+                final_sim += (1.0 - final_sim) * (boost_weight * det_score)
 
             final_sim = min(0.999, final_sim)
 

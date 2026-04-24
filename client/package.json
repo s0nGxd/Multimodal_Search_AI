@@ -9,14 +9,18 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@ai-sdk/google-vertex": "^4.0.112",
     "@huggingface/transformers": "^4.0.1",
+    "ai": "^6.0.168",
     "clsx": "^2.1.1",
     "framer-motion": "^12.29.0",
     "lucide-react": "^0.562.0",
     "next": "16.1.4",
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "tailwind-merge": "^3.4.0"
+    "sharp": "^0.34.5",
+    "tailwind-merge": "^3.4.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

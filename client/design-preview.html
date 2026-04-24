@@ -1,0 +1,1113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1440">
+<title>OVERWATCH // Forensic Visual Retrieval</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700;800&family=Archivo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:          #0A0C0A;
+    --bg-deep:     #050605;
+    --panel:       #111411;
+    --panel-hi:    #181B18;
+    --border:      #242824;
+    --border-hi:   #363B36;
+    --text:        #D4D6CE;
+    --text-dim:    #7A7D74;
+    --text-dimmer: #4A4D45;
+    --amber:       #F5A524;
+    --amber-hi:    #FFC56B;
+    --amber-dim:   #8B5E14;
+    --red:         #E24D4D;
+    --green:       #7FA650;
+    --scan:        rgba(255, 200, 100, 0.015);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: var(--bg); color: var(--text); font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.5; letter-spacing: 0.01em; }
+  body {
+    min-width: 1440px;
+    background-image:
+      repeating-linear-gradient(0deg, var(--scan) 0px, var(--scan) 1px, transparent 1px, transparent 3px),
+      radial-gradient(ellipse at 50% 0%, rgba(245, 165, 36, 0.04), transparent 60%),
+      radial-gradient(ellipse at 100% 100%, rgba(127, 166, 80, 0.02), transparent 70%);
+    background-attachment: fixed;
+  }
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.9 0 0 0 0 0.8 0 0 0 0 0.5 0 0 0 0.08 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    opacity: 0.5;
+    pointer-events: none;
+    z-index: 1000;
+    mix-blend-mode: overlay;
+  }
+
+  .display { font-family: 'Archivo', sans-serif; font-weight: 900; letter-spacing: -0.02em; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+  .ucase { text-transform: uppercase; letter-spacing: 0.12em; }
+  .label { font-size: 10px; color: var(--text-dim); font-weight: 500; text-transform: uppercase; letter-spacing: 0.2em; }
+  .amber { color: var(--amber); }
+  .dim { color: var(--text-dim); }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* Classification bar */
+  .classification {
+    height: 22px;
+    background: var(--bg-deep);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center;
+    padding: 0 20px;
+    font-size: 10px; letter-spacing: 0.25em; text-transform: uppercase;
+    color: var(--text-dimmer);
+    gap: 20px;
+  }
+  .classification .sep { color: var(--border-hi); }
+  .classification .live { color: var(--amber); display: flex; align-items: center; gap: 6px; }
+  .classification .live::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--red);
+    box-shadow: 0 0 8px var(--red);
+    animation: blink 1.4s ease-in-out infinite;
+  }
+  @keyframes blink { 0%, 50% { opacity: 1; } 75%, 100% { opacity: 0.15; } }
+  .classification .right { margin-left: auto; display: flex; gap: 20px; }
+
+  /* Header nav */
+  header.nav {
+    height: 72px;
+    border-bottom: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: 320px 1fr 320px;
+    align-items: center;
+    padding: 0 28px;
+    background: linear-gradient(180deg, rgba(245, 165, 36, 0.02), transparent);
+  }
+  .brand {
+    display: flex; align-items: baseline; gap: 14px;
+  }
+  .brand .logo {
+    width: 36px; height: 36px;
+    border: 1.5px solid var(--amber);
+    position: relative;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .brand .logo::before, .brand .logo::after {
+    content: ''; position: absolute;
+    background: var(--amber);
+  }
+  .brand .logo::before { width: 12px; height: 1.5px; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+  .brand .logo::after { width: 1.5px; height: 12px; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+  .brand .reticle {
+    position: absolute; inset: -4px; border: 1px solid var(--amber);
+    border-radius: 0;
+    opacity: 0.3;
+    animation: pulse 3s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 0.3; transform: scale(1); } 50% { opacity: 0.1; transform: scale(1.15); } }
+  .brand .name {
+    font-family: 'Archivo', sans-serif;
+    font-weight: 900;
+    font-size: 22px;
+    letter-spacing: 0.08em;
+    color: var(--text);
+  }
+  .brand .tag {
+    font-size: 9px; color: var(--text-dimmer); letter-spacing: 0.3em; text-transform: uppercase;
+    padding-left: 2px;
+    margin-top: -4px;
+    display: block;
+  }
+
+  nav.primary {
+    display: flex; gap: 32px; justify-self: center;
+  }
+  nav.primary a {
+    color: var(--text-dim);
+    text-decoration: none;
+    font-size: 11px; font-weight: 500; letter-spacing: 0.22em; text-transform: uppercase;
+    padding: 8px 0;
+    position: relative;
+    transition: color 0.15s;
+  }
+  nav.primary a:hover { color: var(--amber); }
+  nav.primary a.active { color: var(--text); }
+  nav.primary a.active::after {
+    content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 1px; background: var(--amber);
+  }
+  nav.primary a.admin { color: var(--text-dimmer); }
+  nav.primary a.admin::before { content: '◉ '; color: var(--red); }
+
+  .nav-status {
+    justify-self: end;
+    display: flex; align-items: center; gap: 18px;
+    font-size: 10px;
+    color: var(--text-dim);
+  }
+  .nav-status .op {
+    color: var(--green);
+    display: flex; align-items: center; gap: 6px;
+    text-transform: uppercase; letter-spacing: 0.2em;
+  }
+  .nav-status .op::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+  }
+  .nav-status .divider { width: 1px; height: 14px; background: var(--border-hi); }
+  .nav-status .frames { font-variant-numeric: tabular-nums; }
+  .nav-status .frames b { color: var(--text); font-weight: 600; }
+
+  /* Panel primitive — corner brackets */
+  .panel {
+    position: relative;
+    background: var(--panel);
+    border: 1px solid var(--border);
+  }
+  .panel::before, .panel::after,
+  .panel > .bl, .panel > .br {
+    content: ''; position: absolute; width: 10px; height: 10px;
+    border: 1.5px solid var(--amber);
+  }
+  .panel::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; }
+  .panel::after  { top: -1px; right: -1px; border-left: 0; border-bottom: 0; }
+  .panel > .bl   { bottom: -1px; left: -1px; border-right: 0; border-top: 0; }
+  .panel > .br   { bottom: -1px; right: -1px; border-left: 0; border-top: 0; }
+
+  .panel-header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px;
+    background: var(--bg-deep);
+    border-bottom: 1px solid var(--border);
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.22em;
+    color: var(--text-dim);
+  }
+  .panel-header .dot { width: 6px; height: 6px; background: var(--amber); }
+  .panel-header .id  { margin-left: auto; color: var(--text-dimmer); font-size: 9px; }
+
+  /* Hero */
+  main { max-width: 1440px; margin: 0 auto; padding: 0 28px; }
+
+  section.hero {
+    padding: 80px 0 60px;
+    border-bottom: 1px solid var(--border);
+    position: relative;
+  }
+  section.hero::before {
+    content: 'SECTION 001 / MISSION'; position: absolute; top: 40px; left: 0;
+    font-size: 9px; letter-spacing: 0.3em; color: var(--text-dimmer);
+  }
+  section.hero::after {
+    content: 'RETRIEVAL ENGINE'; position: absolute; top: 40px; right: 0;
+    font-size: 9px; letter-spacing: 0.3em; color: var(--text-dimmer);
+  }
+  .hero-grid {
+    display: grid;
+    grid-template-columns: 1fr 400px;
+    gap: 60px;
+    align-items: end;
+  }
+  .hero h1 {
+    font-family: 'Archivo', sans-serif;
+    font-weight: 900;
+    font-size: 88px;
+    line-height: 0.92;
+    letter-spacing: -0.035em;
+    color: var(--text);
+    margin-bottom: 32px;
+  }
+  .hero h1 .break { color: var(--amber); }
+  .hero h1 .muted { color: var(--text-dimmer); font-weight: 400; font-style: italic; font-family: 'JetBrains Mono', monospace; font-size: 22px; display: block; letter-spacing: 0; margin-top: 20px; font-weight: 300; }
+  .hero p {
+    max-width: 640px;
+    font-size: 14px; color: var(--text-dim); line-height: 1.65;
+    margin-bottom: 36px;
+  }
+  .hero p b { color: var(--text); font-weight: 500; }
+  .hero .cta-row { display: flex; gap: 12px; }
+  .btn {
+    padding: 14px 22px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; font-weight: 600;
+    letter-spacing: 0.22em; text-transform: uppercase;
+    border: 1px solid var(--border-hi);
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+    transition: all 0.15s;
+    display: flex; align-items: center; gap: 10px;
+    position: relative;
+  }
+  .btn:hover { border-color: var(--amber); color: var(--amber); }
+  .btn.primary { background: var(--amber); color: var(--bg-deep); border-color: var(--amber); }
+  .btn.primary:hover { background: var(--amber-hi); border-color: var(--amber-hi); color: var(--bg-deep); }
+  .btn::before, .btn::after { content: ''; position: absolute; width: 6px; height: 6px; border: 1px solid currentColor; }
+  .btn::before { top: 2px; left: 2px; border-right: 0; border-bottom: 0; opacity: 0.6; }
+  .btn::after { bottom: 2px; right: 2px; border-left: 0; border-top: 0; opacity: 0.6; }
+
+  .hero-stats {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0;
+    border: 1px solid var(--border);
+    background: var(--panel);
+  }
+  .hero-stats .row {
+    padding: 22px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .hero-stats .row:last-child { border-bottom: 0; }
+  .hero-stats .row .v {
+    font-family: 'Archivo', sans-serif;
+    font-weight: 800;
+    font-size: 40px;
+    letter-spacing: -0.03em;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .hero-stats .row .v .unit { font-size: 14px; color: var(--text-dim); margin-left: 6px; font-weight: 500; letter-spacing: 0; }
+  .hero-stats .row .l { font-size: 10px; color: var(--text-dim); letter-spacing: 0.22em; text-transform: uppercase; text-align: right; max-width: 140px; }
+
+  /* Query console */
+  section.console {
+    padding: 48px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-title {
+    display: flex; align-items: center; gap: 14px;
+    margin-bottom: 24px;
+  }
+  .section-title .idx { font-size: 10px; color: var(--text-dimmer); letter-spacing: 0.3em; }
+  .section-title h2 {
+    font-family: 'Archivo', sans-serif;
+    font-weight: 800;
+    font-size: 22px;
+    letter-spacing: -0.01em;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+  .section-title .line { flex: 1; height: 1px; background: var(--border); }
+  .section-title .side { font-size: 10px; color: var(--text-dim); letter-spacing: 0.22em; text-transform: uppercase; }
+
+  .query-panel { padding: 28px 32px; }
+  .query-row {
+    display: grid;
+    grid-template-columns: 1fr 180px;
+    gap: 14px;
+    margin-bottom: 24px;
+  }
+  .query-input-wrap {
+    position: relative;
+    border: 1px solid var(--border-hi);
+    background: var(--bg-deep);
+    padding: 0 52px 0 52px;
+    display: flex; align-items: center;
+    height: 62px;
+  }
+  .query-input-wrap:focus-within { border-color: var(--amber); }
+  .query-input-wrap::before {
+    content: '>'; position: absolute; left: 20px; top: 50%; transform: translateY(-50%);
+    color: var(--amber); font-weight: 600; font-size: 18px;
+  }
+  .query-input-wrap::after {
+    content: ''; position: absolute; right: 20px; top: 50%; transform: translateY(-50%);
+    width: 9px; height: 16px; background: var(--amber);
+    animation: cursor 1.1s step-end infinite;
+  }
+  @keyframes cursor { 50% { opacity: 0; } }
+  .query-input-wrap input {
+    width: 100%; background: transparent; border: 0; outline: 0;
+    color: var(--text); font-family: 'JetBrains Mono', monospace;
+    font-size: 16px; font-weight: 400; letter-spacing: 0.02em;
+  }
+  .query-input-wrap input::placeholder { color: var(--text-dimmer); font-style: italic; }
+
+  .query-execute {
+    background: var(--amber);
+    color: var(--bg-deep);
+    border: 0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; font-weight: 700;
+    letter-spacing: 0.22em; text-transform: uppercase;
+    cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+    transition: background 0.15s;
+  }
+  .query-execute:hover { background: var(--amber-hi); }
+  .query-execute .sub { font-size: 9px; font-weight: 500; opacity: 0.7; letter-spacing: 0.3em; }
+
+  .query-examples { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 24px; }
+  .query-examples .lbl { font-size: 10px; color: var(--text-dim); letter-spacing: 0.22em; text-transform: uppercase; align-self: center; margin-right: 8px; }
+  .chip {
+    padding: 7px 13px;
+    border: 1px solid var(--border);
+    background: var(--bg-deep);
+    color: var(--text-dim);
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .chip:hover { border-color: var(--amber-dim); color: var(--text); }
+  .chip.active { border-color: var(--amber); color: var(--amber); }
+  .chip::before { content: '"'; color: var(--text-dimmer); }
+  .chip::after { content: '"'; color: var(--text-dimmer); }
+
+  .filter-bar {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+  }
+  .filter {
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .filter .lbl { font-size: 10px; color: var(--text-dim); letter-spacing: 0.22em; text-transform: uppercase; }
+  .filter .val {
+    padding: 9px 12px;
+    background: var(--bg-deep);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 12px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .filter .val .arrow { color: var(--text-dim); font-size: 10px; }
+  .filter .val .amber { color: var(--amber); }
+
+  /* Results */
+  section.results {
+    padding: 48px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .results-meta {
+    display: flex; align-items: center; gap: 20px;
+    padding: 12px 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-bottom: 0;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .results-meta .tag {
+    padding: 3px 8px;
+    background: var(--bg-deep);
+    color: var(--amber);
+    border: 1px solid var(--amber-dim);
+    font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase;
+  }
+  .results-meta .query { color: var(--text); font-style: italic; }
+  .results-meta .right { margin-left: auto; display: flex; gap: 16px; }
+  .results-meta .ms { color: var(--green); font-variant-numeric: tabular-nums; }
+
+  .results-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0;
+    border: 1px solid var(--border);
+    background: var(--border);
+  }
+  .frame {
+    background: var(--panel);
+    position: relative;
+    aspect-ratio: 4/3;
+    overflow: hidden;
+    cursor: pointer;
+    transition: transform 0.25s;
+  }
+  .frame:hover { z-index: 2; }
+  .frame:hover .frame-scene { filter: brightness(1.15); }
+  .frame .frame-rank {
+    position: absolute; top: 10px; left: 10px; z-index: 3;
+    font-family: 'Archivo', sans-serif;
+    font-weight: 900;
+    font-size: 14px;
+    color: var(--amber);
+    background: rgba(0, 0, 0, 0.7);
+    padding: 4px 8px;
+    letter-spacing: 0.1em;
+    border: 1px solid var(--amber-dim);
+  }
+  .frame .frame-cam {
+    position: absolute; top: 10px; right: 10px; z-index: 3;
+    font-size: 10px;
+    color: var(--text);
+    background: rgba(0, 0, 0, 0.7);
+    padding: 4px 8px;
+    letter-spacing: 0.18em; text-transform: uppercase;
+    border: 1px solid var(--border-hi);
+  }
+  .frame .frame-cam .rec { color: var(--red); margin-right: 6px; animation: blink 1.4s infinite; }
+
+  .frame-scene {
+    position: absolute; inset: 0;
+    transition: filter 0.25s;
+  }
+  .frame-scene::after {
+    content: '';
+    position: absolute; inset: 0;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.2' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.95 0 0 0 0 0.85 0 0 0 0 0.6 0 0 0 0.4 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    opacity: 0.35;
+    mix-blend-mode: overlay;
+  }
+  .frame-scene::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,0) 0px, rgba(0,0,0,0) 2px, rgba(0,0,0,0.15) 2px, rgba(0,0,0,0.15) 3px);
+    z-index: 1;
+  }
+
+  /* Scene variants — CSS-only CCTV scene mockups */
+  .scene-atrium {
+    background:
+      radial-gradient(ellipse 80% 50% at 50% 60%, rgba(215, 195, 155, 0.22), transparent),
+      linear-gradient(180deg, #1c1e1a 0%, #252722 40%, #181915 75%, #0e0f0c 100%),
+      #15161a;
+  }
+  .scene-atrium::after { }
+  .scene-parking {
+    background:
+      radial-gradient(circle 120px at 25% 35%, rgba(245, 165, 36, 0.2), transparent),
+      radial-gradient(circle 90px at 75% 70%, rgba(245, 165, 36, 0.12), transparent),
+      linear-gradient(180deg, #0f1011 0%, #14161a 50%, #090a0c 100%);
+  }
+  .scene-loading {
+    background:
+      repeating-linear-gradient(90deg, transparent 0px, transparent 80px, rgba(245, 165, 36, 0.05) 80px, rgba(245, 165, 36, 0.05) 82px),
+      linear-gradient(180deg, rgba(200, 140, 60, 0.18) 0%, rgba(20, 22, 19, 1) 40%, rgba(10, 11, 9, 1) 100%);
+  }
+  .scene-corridor {
+    background:
+      linear-gradient(180deg, rgba(180, 170, 140, 0.14) 0%, rgba(120, 110, 90, 0.06) 30%, transparent 55%),
+      radial-gradient(ellipse 30% 60% at 50% 75%, rgba(240, 180, 80, 0.18), transparent),
+      linear-gradient(180deg, #1a1b17 0%, #131411 50%, #0a0b09 100%);
+  }
+  .scene-entrance {
+    background:
+      linear-gradient(110deg, rgba(240, 230, 200, 0.3) 0%, rgba(240, 230, 200, 0.08) 35%, transparent 55%),
+      linear-gradient(180deg, #1f201c 0%, #161713 60%, #0b0c0a 100%);
+  }
+  .scene-atrium2 {
+    background:
+      radial-gradient(ellipse 60% 40% at 35% 55%, rgba(215, 195, 155, 0.18), transparent),
+      radial-gradient(circle 50px at 70% 40%, rgba(127, 166, 80, 0.12), transparent),
+      linear-gradient(180deg, #181a16 0%, #1f211c 50%, #0f100e 100%);
+  }
+
+  /* CSS-drawn silhouettes inside frames */
+  .silhouette {
+    position: absolute; z-index: 2;
+  }
+  .sil-person {
+    width: 32px; height: 70px;
+    background:
+      radial-gradient(ellipse 60% 70% at 50% 20%, rgba(0,0,0,0.7), rgba(0,0,0,0.3) 70%),
+      linear-gradient(180deg, rgba(40,60,90,0.7) 0%, rgba(25,30,40,0.9) 50%, rgba(20,22,25,1) 100%);
+    border-radius: 8px 8px 2px 2px;
+    clip-path: polygon(35% 0, 65% 0, 70% 18%, 95% 30%, 95% 100%, 5% 100%, 5% 30%, 30% 18%);
+  }
+  .sil-person.blue { background: linear-gradient(180deg, rgba(50,80,140,0.9) 15%, rgba(30,45,80,1) 50%, rgba(15,20,30,1) 100%); }
+  .sil-person.dark { background: linear-gradient(180deg, rgba(40,40,40,0.9), rgba(10,10,12,1)); }
+  .sil-car {
+    width: 90px; height: 36px;
+    background: linear-gradient(180deg, rgba(70,70,80,0.95) 0%, rgba(30,30,35,1) 60%, rgba(15,15,20,1) 100%);
+    border-radius: 8px 12px 4px 4px / 16px 20px 4px 4px;
+  }
+
+  /* Bounding boxes */
+  .bbox {
+    position: absolute;
+    border: 1.5px solid var(--amber);
+    z-index: 4;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.6);
+  }
+  .bbox::before, .bbox::after, .bbox > i, .bbox > i + i {
+    content: ''; position: absolute; width: 8px; height: 8px;
+    border: 2px solid var(--amber);
+  }
+  .bbox::before { top: -4px; left: -4px; border-right: 0; border-bottom: 0; }
+  .bbox::after { top: -4px; right: -4px; border-left: 0; border-bottom: 0; }
+  .bbox > i { bottom: -4px; left: -4px; border-right: 0; border-top: 0; }
+  .bbox > i + i { bottom: -4px; right: -4px; border-left: 0; border-top: 0; }
+  .bbox .tag {
+    position: absolute;
+    top: -22px; left: -1.5px;
+    background: var(--amber);
+    color: var(--bg-deep);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    padding: 2px 6px;
+    white-space: nowrap;
+  }
+  .bbox.low { border-color: #b08530; }
+  .bbox.low::before, .bbox.low::after, .bbox.low > i, .bbox.low > i + i { border-color: #b08530; }
+  .bbox.low .tag { background: #b08530; }
+
+  .frame-meta {
+    position: absolute; bottom: 0; left: 0; right: 0; z-index: 3;
+    padding: 10px 12px;
+    background: linear-gradient(180deg, transparent, rgba(0,0,0,0.85) 40%);
+    display: flex; align-items: flex-end; justify-content: space-between;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .frame-meta .ts { font-variant-numeric: tabular-nums; color: var(--text); }
+  .frame-meta .score-block { text-align: right; }
+  .frame-meta .score-block .sc {
+    font-family: 'Archivo', sans-serif;
+    font-weight: 900;
+    font-size: 22px;
+    color: var(--amber);
+    letter-spacing: -0.02em;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .frame-meta .score-block .sc.mid { color: #c99438; }
+  .frame-meta .score-block .sc.low { color: #8b7541; }
+  .frame-meta .score-block .sl { font-size: 8px; letter-spacing: 0.3em; color: var(--text-dimmer); }
+
+  /* Pipeline */
+  section.pipeline {
+    padding: 80px 0 100px;
+    position: relative;
+  }
+  section.pipeline::before {
+    content: 'SECTION 002 / MECHANISM'; position: absolute; top: 40px; left: 0;
+    font-size: 9px; letter-spacing: 0.3em; color: var(--text-dimmer);
+  }
+  .pipe-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0;
+    margin-top: 44px;
+    border: 1px solid var(--border);
+  }
+  .pipe-step {
+    padding: 32px 28px 28px;
+    border-right: 1px solid var(--border);
+    position: relative;
+    background: var(--panel);
+  }
+  .pipe-step:last-child { border-right: 0; }
+  .pipe-step::after {
+    content: '→';
+    position: absolute; right: -10px; top: 40px;
+    width: 20px; height: 20px;
+    background: var(--bg);
+    border: 1px solid var(--amber);
+    color: var(--amber);
+    font-size: 11px;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 2;
+  }
+  .pipe-step:last-child::after { display: none; }
+  .pipe-step .idx {
+    font-family: 'Archivo', sans-serif;
+    font-weight: 900;
+    font-size: 48px;
+    color: var(--amber-dim);
+    line-height: 1;
+    letter-spacing: -0.04em;
+    margin-bottom: 12px;
+  }
+  .pipe-step h3 {
+    font-family: 'Archivo', sans-serif;
+    font-weight: 800;
+    font-size: 15px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text);
+    margin-bottom: 16px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .pipe-step p {
+    font-size: 12px;
+    color: var(--text-dim);
+    line-height: 1.6;
+    margin-bottom: 14px;
+  }
+  .pipe-step .spec {
+    font-size: 10px;
+    color: var(--amber);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    padding-top: 12px;
+    border-top: 1px dashed var(--border-hi);
+    display: flex; justify-content: space-between;
+  }
+  .pipe-step .spec .k { color: var(--text-dimmer); }
+
+  /* Footer */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 32px 28px;
+    margin: 0 auto;
+    max-width: 1440px;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 10px;
+    color: var(--text-dimmer);
+    letter-spacing: 0.22em; text-transform: uppercase;
+  }
+  footer .grp { display: flex; gap: 24px; }
+
+  /* Stagger reveal */
+  .reveal { opacity: 0; transform: translateY(8px); animation: reveal 0.6s cubic-bezier(.2,.6,.2,1) forwards; }
+  @keyframes reveal { to { opacity: 1; transform: none; } }
+  .r1 { animation-delay: 0.05s; } .r2 { animation-delay: 0.12s; } .r3 { animation-delay: 0.2s; }
+  .r4 { animation-delay: 0.28s; } .r5 { animation-delay: 0.36s; } .r6 { animation-delay: 0.44s; }
+
+</style>
+</head>
+<body>
+
+<!-- Classification bar -->
+<div class="classification">
+  <span>UNCLASSIFIED</span>
+  <span class="sep">//</span>
+  <span>INTERNAL USE</span>
+  <span class="sep">//</span>
+  <span>OPERATIONAL</span>
+  <span class="live">LIVE FEED</span>
+  <span class="right">
+    <span>SYS v2.1.0-b4</span>
+    <span class="sep">//</span>
+    <span id="clock">2026-04-24 23:14:07 UTC</span>
+    <span class="sep">//</span>
+    <span>NODE: HF-IAD1</span>
+  </span>
+</div>
+
+<!-- Nav -->
+<header class="nav">
+  <div class="brand">
+    <div class="logo">
+      <div class="reticle"></div>
+    </div>
+    <div>
+      <div class="name">OVERWATCH</div>
+      <span class="tag">Forensic Retrieval System</span>
+    </div>
+  </div>
+  <nav class="primary">
+    <a href="#" class="active">RETRIEVE</a>
+    <a href="#">ARCHIVES</a>
+    <a href="#">EVIDENCE</a>
+    <a href="#">AUDIT LOG</a>
+    <a href="#" class="admin">ADMIN</a>
+  </nav>
+  <div class="nav-status">
+    <span class="op">Operational</span>
+    <span class="divider"></span>
+    <span class="frames"><b>14,283</b> frames indexed</span>
+  </div>
+</header>
+
+<main>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="hero-grid">
+      <div class="reveal r1">
+        <h1>
+          FORENSIC VISUAL<br>
+          RETRIEVAL FOR<br>
+          <span class="break">SURVEILLANCE</span> ARCHIVES.
+          <span class="muted">// Describe a subject. Recover the frame. Export the evidence.</span>
+        </h1>
+        <p>
+          OVERWATCH indexes CCTV and body-camera footage into a dense multimodal vector
+          store, then retrieves matching frames from natural-language descriptions.
+          <b>Operators query hours of footage in seconds</b> — no timestamp scrubbing,
+          no manual review. Every match returns with geometric evidence: bounding-box
+          confirmation from a verified object detector.
+        </p>
+        <div class="cta-row">
+          <button class="btn primary">
+            <span>► INITIATE RETRIEVAL</span>
+          </button>
+          <button class="btn">
+            <span>◉ REVIEW ARCHIVE</span>
+          </button>
+        </div>
+      </div>
+      <div class="panel reveal r2">
+        <span class="bl"></span><span class="br"></span>
+        <div class="panel-header">
+          <div class="dot"></div>
+          <span>SYSTEM TELEMETRY</span>
+          <span class="id">LIVE</span>
+        </div>
+        <div class="hero-stats">
+          <div class="row">
+            <div class="v">14,283</div>
+            <div class="l">Frames under index</div>
+          </div>
+          <div class="row">
+            <div class="v">0.97<span class="unit">s</span></div>
+            <div class="l">Median query latency</div>
+          </div>
+          <div class="row">
+            <div class="v">41</div>
+            <div class="l">Active camera feeds</div>
+          </div>
+          <div class="row">
+            <div class="v">86.7<span class="unit">%</span></div>
+            <div class="l">Precision at 10 (evaluated)</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Query Console -->
+  <section class="console">
+    <div class="section-title reveal r3">
+      <span class="idx">01 //</span>
+      <h2>Query Console</h2>
+      <span class="line"></span>
+      <span class="side">Natural Language Retrieval</span>
+    </div>
+
+    <div class="panel query-panel reveal r3">
+      <span class="bl"></span><span class="br"></span>
+
+      <div class="query-row">
+        <div class="query-input-wrap">
+          <input type="text" value="person in a blue jacket near the loading bay" placeholder="Describe subject, object, or activity...">
+        </div>
+        <button class="query-execute">
+          EXECUTE
+          <span class="sub">↵ ENTER</span>
+        </button>
+      </div>
+
+      <div class="query-examples">
+        <span class="lbl">Suggested:</span>
+        <span class="chip">child unattended in atrium</span>
+        <span class="chip active">person in a blue jacket near the loading bay</span>
+        <span class="chip">vehicle entering after 21:00</span>
+        <span class="chip">group of three at west entrance</span>
+        <span class="chip">individual carrying a backpack</span>
+      </div>
+
+      <div class="filter-bar">
+        <div class="filter">
+          <span class="lbl">Time Range</span>
+          <div class="val">
+            <span>Last 48 hours</span>
+            <span class="arrow">▾</span>
+          </div>
+        </div>
+        <div class="filter">
+          <span class="lbl">Camera Set</span>
+          <div class="val">
+            <span>All Active (<span class="amber">41</span>)</span>
+            <span class="arrow">▾</span>
+          </div>
+        </div>
+        <div class="filter">
+          <span class="lbl">Min. Confidence</span>
+          <div class="val">
+            <span><span class="amber">65%</span> threshold</span>
+            <span class="arrow">▾</span>
+          </div>
+        </div>
+        <div class="filter">
+          <span class="lbl">Result Limit</span>
+          <div class="val">
+            <span>Top 24 frames</span>
+            <span class="arrow">▾</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Results -->
+  <section class="results">
+    <div class="section-title reveal r4">
+      <span class="idx">02 //</span>
+      <h2>Retrieval Output</h2>
+      <span class="line"></span>
+      <span class="side">Ranked by SigLIP × OWL-ViT</span>
+    </div>
+
+    <div class="results-meta reveal r4">
+      <span class="tag">● MATCH</span>
+      <span>6 frames returned</span>
+      <span>·</span>
+      <span class="query">"person in a blue jacket near the loading bay"</span>
+      <span class="right">
+        <span>Query <span class="ms">0.974s</span></span>
+        <span>Detection <span class="ms">0.412s</span></span>
+        <span>Σ 1.386s</span>
+      </span>
+    </div>
+
+    <div class="results-grid reveal r5">
+
+      <!-- Frame 1 -->
+      <div class="frame">
+        <div class="frame-rank">#01</div>
+        <div class="frame-cam"><span class="rec">●</span>CAM-04 · ATRIUM-N</div>
+        <div class="frame-scene scene-atrium">
+          <div class="silhouette sil-person blue" style="left: 38%; top: 40%; width: 28px; height: 58px;"></div>
+          <div class="silhouette sil-person" style="left: 20%; top: 45%; width: 22px; height: 44px; opacity: 0.7;"></div>
+          <div class="silhouette sil-person dark" style="left: 70%; top: 48%; width: 20px; height: 40px; opacity: 0.6;"></div>
+          <div class="bbox" style="left: 36%; top: 38%; width: 12%; height: 30%;">
+            <i></i><i></i>
+            <span class="tag">PERSON · 0.94</span>
+          </div>
+        </div>
+        <div class="frame-meta">
+          <div>
+            <div class="ts">2026-04-23 · 14:37:12</div>
+            <div>Frame 0247 / 0612</div>
+          </div>
+          <div class="score-block">
+            <div class="sc">92<span style="font-size:12px;">%</span></div>
+            <div class="sl">MATCH</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Frame 2 -->
+      <div class="frame">
+        <div class="frame-rank">#02</div>
+        <div class="frame-cam"><span class="rec">●</span>CAM-12 · DOCK-W</div>
+        <div class="frame-scene scene-loading">
+          <div class="silhouette sil-person blue" style="left: 50%; top: 48%; width: 26px; height: 52px;"></div>
+          <div class="silhouette" style="left: 15%; top: 60%; width: 60px; height: 24px; background: linear-gradient(180deg, rgba(50,50,55,0.8), rgba(20,20,22,1)); border-radius: 4px;"></div>
+          <div class="bbox" style="left: 47%; top: 46%; width: 11%; height: 28%;">
+            <i></i><i></i>
+            <span class="tag">PERSON · 0.89</span>
+          </div>
+        </div>
+        <div class="frame-meta">
+          <div>
+            <div class="ts">2026-04-23 · 14:38:04</div>
+            <div>Frame 0312 / 0612</div>
+          </div>
+          <div class="score-block">
+            <div class="sc">87<span style="font-size:12px;">%</span></div>
+            <div class="sl">MATCH</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Frame 3 -->
+      <div class="frame">
+        <div class="frame-rank">#03</div>
+        <div class="frame-cam"><span class="rec">●</span>CAM-07 · DOCK-E</div>
+        <div class="frame-scene scene-loading">
+          <div class="silhouette sil-person blue" style="left: 32%; top: 45%; width: 24px; height: 50px;"></div>
+          <div class="silhouette sil-person dark" style="left: 58%; top: 48%; width: 22px; height: 46px;"></div>
+          <div class="bbox" style="left: 29%; top: 43%; width: 11%; height: 28%;">
+            <i></i><i></i>
+            <span class="tag">PERSON · 0.82</span>
+          </div>
+          <div class="bbox low" style="left: 56%; top: 46%; width: 10%; height: 26%;">
+            <i></i><i></i>
+            <span class="tag">PERSON · 0.71</span>
+          </div>
+        </div>
+        <div class="frame-meta">
+          <div>
+            <div class="ts">2026-04-23 · 14:42:31</div>
+            <div>Frame 0412 / 0612</div>
+          </div>
+          <div class="score-block">
+            <div class="sc">81<span style="font-size:12px;">%</span></div>
+            <div class="sl">MATCH</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Frame 4 -->
+      <div class="frame">
+        <div class="frame-rank">#04</div>
+        <div class="frame-cam"><span class="rec">●</span>CAM-02 · ENTRANCE</div>
+        <div class="frame-scene scene-entrance">
+          <div class="silhouette sil-person blue" style="left: 55%; top: 42%; width: 26px; height: 54px;"></div>
+          <div class="silhouette sil-person" style="left: 28%; top: 50%; width: 20px; height: 40px; opacity: 0.6;"></div>
+          <div class="bbox" style="left: 52%; top: 40%; width: 13%; height: 30%;">
+            <i></i><i></i>
+            <span class="tag">PERSON · 0.78</span>
+          </div>
+        </div>
+        <div class="frame-meta">
+          <div>
+            <div class="ts">2026-04-23 · 14:51:09</div>
+            <div>Frame 0028 / 0470</div>
+          </div>
+          <div class="score-block">
+            <div class="sc mid">78<span style="font-size:12px;">%</span></div>
+            <div class="sl">MATCH</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Frame 5 -->
+      <div class="frame">
+        <div class="frame-rank">#05</div>
+        <div class="frame-cam"><span class="rec">●</span>CAM-09 · ATRIUM-S</div>
+        <div class="frame-scene scene-atrium2">
+          <div class="silhouette sil-person blue" style="left: 60%; top: 46%; width: 24px; height: 48px;"></div>
+          <div class="silhouette sil-person dark" style="left: 25%; top: 52%; width: 18px; height: 38px; opacity: 0.7;"></div>
+          <div class="silhouette sil-person" style="left: 40%; top: 50%; width: 20px; height: 42px; opacity: 0.6;"></div>
+          <div class="bbox low" style="left: 57%; top: 44%; width: 11%; height: 28%;">
+            <i></i><i></i>
+            <span class="tag">PERSON · 0.69</span>
+          </div>
+        </div>
+        <div class="frame-meta">
+          <div>
+            <div class="ts">2026-04-23 · 15:02:48</div>
+            <div>Frame 0194 / 0490</div>
+          </div>
+          <div class="score-block">
+            <div class="sc mid">71<span style="font-size:12px;">%</span></div>
+            <div class="sl">MATCH</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Frame 6 -->
+      <div class="frame">
+        <div class="frame-rank">#06</div>
+        <div class="frame-cam"><span class="rec">●</span>CAM-15 · CORRIDOR-B</div>
+        <div class="frame-scene scene-corridor">
+          <div class="silhouette sil-person blue" style="left: 48%; top: 42%; width: 22px; height: 50px;"></div>
+          <div class="bbox low" style="left: 45%; top: 40%; width: 10%; height: 30%;">
+            <i></i><i></i>
+            <span class="tag">PERSON · 0.61</span>
+          </div>
+        </div>
+        <div class="frame-meta">
+          <div>
+            <div class="ts">2026-04-23 · 15:08:17</div>
+            <div>Frame 0055 / 0380</div>
+          </div>
+          <div class="score-block">
+            <div class="sc low">64<span style="font-size:12px;">%</span></div>
+            <div class="sl">MATCH</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+  </section>
+
+  <!-- Pipeline -->
+  <section class="pipeline">
+    <div class="section-title reveal r6">
+      <span class="idx">03 //</span>
+      <h2>Retrieval Pipeline</h2>
+      <span class="line"></span>
+      <span class="side">4-Stage Architecture</span>
+    </div>
+
+    <div class="pipe-grid reveal r6">
+      <div class="pipe-step">
+        <div class="idx">01</div>
+        <h3>Ingest</h3>
+        <p>
+          Footage streams into a persistent frame store. Video is sampled at 1 frame per 2 seconds;
+          static images pass through unchanged. Original files retained unmodified for evidentiary chain-of-custody.
+        </p>
+        <div class="spec">
+          <span><span class="k">MEDIA</span> MP4 · MOV · JPG</span>
+          <span>13 s/img</span>
+        </div>
+      </div>
+      <div class="pipe-step">
+        <div class="idx">02</div>
+        <h3>Embed</h3>
+        <p>
+          Each frame is passed through a frozen SigLIP vision encoder, producing a 768-dimensional
+          dense vector. Vectors land in LanceDB with IVF-PQ indexing for sub-linear retrieval at scale.
+        </p>
+        <div class="spec">
+          <span><span class="k">MODEL</span> SigLIP-B/16-256</span>
+          <span>768-d</span>
+        </div>
+      </div>
+      <div class="pipe-step">
+        <div class="idx">03</div>
+        <h3>Query</h3>
+        <p>
+          Operator enters a description in natural English. The same SigLIP encoder embeds the query;
+          the system returns the top 15 candidate frames by cosine similarity in under one second.
+        </p>
+        <div class="spec">
+          <span><span class="k">METRIC</span> Cosine</span>
+          <span>0.97s med.</span>
+        </div>
+      </div>
+      <div class="pipe-step">
+        <div class="idx">04</div>
+        <h3>Verify</h3>
+        <p>
+          Candidate frames are passed to OWL-ViT open-vocabulary object detection using the query
+          as the detection prompt. Frames with confirmed detections rise; false-positives fall. Bounding boxes returned with evidence.
+        </p>
+        <div class="spec">
+          <span><span class="k">DETECTOR</span> OWL-ViT-B/32</span>
+          <span>geom. verified</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="grp">
+    <span>OVERWATCH v2.1.0</span>
+    <span>·</span>
+    <span>BUILD 2026.04.b4</span>
+  </div>
+  <div class="grp">
+    <span>HF-IAD1 · RTT 41ms</span>
+    <span>·</span>
+    <span>SigLIP / OWL-ViT / LanceDB</span>
+  </div>
+  <div class="grp">
+    <span>SESSION 9F2A-C</span>
+    <span>·</span>
+    <span class="amber">OPERATIONAL</span>
+  </div>
+</footer>
+
+<script>
+  // Live clock in classification bar
+  function pad(n) { return n.toString().padStart(2, '0'); }
+  function tick() {
+    const d = new Date();
+    const s =
+      `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ` +
+      `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} UTC`;
+    document.getElementById('clock').textContent = s;
+  }
+  tick();
+  setInterval(tick, 1000);
+
+  // Chip interactivity (visual only in the mock)
+  document.querySelectorAll('.chip').forEach(el => {
+    el.addEventListener('click', () => {
+      document.querySelectorAll('.chip').forEach(x => x.classList.remove('active'));
+      el.classList.add('active');
+      const q = el.textContent.trim();
+      document.querySelector('.query-input-wrap input').value = q;
+    });
+  });
+</script>
+
+</body>
+</html>
