@@ -7,8 +7,19 @@ from app.services.persistence_service import restore_from_repo
 
 @asynccontextmanager
 async def lifespan(app):
-    """Startup: restore persisted data from HF Dataset repo."""
+    """Startup: restore persisted data + warm up models."""
     restore_from_repo()
+    try:
+        from app.services.search_service import search_service
+        from app.services.detection_service import detection_service
+        from PIL import Image
+        # Dummy forward pass on both models so first real query is fast
+        _ = search_service.embed_text("warmup")
+        dummy = Image.new("RGB", (64, 64), color=(0, 0, 0))
+        _ = detection_service.detect(dummy, "warmup")
+        print("Models warmed up (SigLIP + OWL-ViT).")
+    except Exception as e:
+        print(f"Model warmup skipped/failed: {e}")
     yield
 
 app = FastAPI(title="SEGP Semantic Search API", lifespan=lifespan)
@@ -57,6 +68,25 @@ def root():
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "service": "semantic-search-api"}
+
+@app.get("/ready")
+async def readiness_check():
+    try:
+        from app.services.search_service import search_service
+        from app.services.detection_service import detection_service
+        from PIL import Image
+        _ = search_service.embed_text("ready")
+        dummy = Image.new("RGB", (64, 64), color=(0, 0, 0))
+        _ = detection_service.detect(dummy, "ready")
+        return {"status": "ready", "service": "semantic-search-api"}
+    except Exception as e:
+        from fastapi import Response
+        import json
+        return Response(
+            content=json.dumps({"status": "warming", "detail": str(e)[:200]}),
+            status_code=503,
+            media_type="application/json",
+        )
 
 @app.delete("/api/images/{photo_id}")
 async def delete_image(photo_id: str):
