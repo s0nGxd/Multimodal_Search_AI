@@ -12,7 +12,11 @@ export default function Home() {
     const [loading, setLoading] = useState(false);
     const [hasSearched, setHasSearched] = useState(false);
     const [resultCount, setResultCount] = useState(20);
-    const [minSimilarity, setMinSimilarity] = useState(0.25);
+    // The slider value is the user-facing 0-100% display. Internally we
+    // remap it into the smaller range the model can actually produce so the
+    // full slider is usable instead of the top half being dead space.
+    const SLIDER_MAX_THRESHOLD = 0.8; // display 100% -> backend threshold 0.8
+    const [minSimilarity, setMinSimilarity] = useState(0.3);
     const [showSettings, setShowSettings] = useState(false);
     const [focusedImage, setFocusedImage] = useState<SearchResult | null>(null);
     const [bboxes, setBboxes] = useState<TrackResult[]>([]);
@@ -171,8 +175,9 @@ export default function Home() {
         if (!query.trim()) return;
         setLoading(true);
         try {
-            // FIXED: Slider value now matches image preview percentage 1-to-1
-            const data = await searchImages(query, resultCount, minSimilarity);
+            // Map the user-facing 0-1 slider value into the backend threshold's
+            // 0..SLIDER_MAX_THRESHOLD band so the full slider is meaningful.
+            const data = await searchImages(query, resultCount, minSimilarity * SLIDER_MAX_THRESHOLD);
             setResults(data);
             setHasSearched(true);
         } catch (error) {
