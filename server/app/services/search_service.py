@@ -196,12 +196,12 @@ class SearchService:
         for pid in sorted_pids:
             row = best_row[pid].copy()
             v_url = row.get("video_url", "")
-            
+
             if v_url and v_url in seen_videos:
                 continue
             if v_url:
                 seen_videos.add(v_url)
-                
+
             dist = float(row.get("_distance", 1.0))
             det_score = float(row.get("_detection_score", 0.0))
 
@@ -214,17 +214,24 @@ class SearchService:
 
             final_sim = min(0.999, final_sim)
 
-            
             if final_sim < threshold:
                 continue
-                
+
+            # Surface the matched frame's timestamp as best_timestamp for video results.
+            # Photos (no video_url) carry best_timestamp=None.
+            frame_ts = row.get("timestamp")
+            if v_url and frame_ts is not None and pd.notna(frame_ts):
+                row["best_timestamp"] = float(frame_ts)
+            else:
+                row["best_timestamp"] = None
+
             row["_rrf_score"] = rrf_scores[pid]
             row["similarity_score"] = final_sim
-            
+
             results.append(row)
             if len(results) >= k:
                 break
-                
+
         return results
 
 search_service = SearchService()
