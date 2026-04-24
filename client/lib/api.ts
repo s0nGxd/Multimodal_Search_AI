@@ -1,5 +1,6 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
 const HEALTH_URL = API_BASE.replace('/api', '/health');
+const READY_URL = API_BASE.replace('/api', '/ready');
 
 export interface IngestResult {
     id: string;
@@ -53,6 +54,27 @@ export async function waitForBackend(onAttempt?: (attempt: number) => void): Pro
         await new Promise(r => setTimeout(r, 3000));
     }
     throw new Error('Backend did not respond after 90 seconds');
+}
+
+export async function checkBackendReady(): Promise<boolean> {
+    try {
+        const res = await fetch(READY_URL, { signal: AbortSignal.timeout(15000) });
+        if (!res.ok) return false;
+        const data = await res.json();
+        return data?.status === 'ready';
+    } catch {
+        return false;
+    }
+}
+
+export async function waitForBackendReady(onAttempt?: (attempt: number) => void): Promise<void> {
+    for (let i = 1; i <= 30; i++) {
+        onAttempt?.(i);
+        const ready = await checkBackendReady();
+        if (ready) return;
+        await new Promise(r => setTimeout(r, 3000));
+    }
+    throw new Error('Backend did not become ready after 90 seconds');
 }
 
 export async function searchImages(query: string, k: number = 20, threshold: number = 0.20): Promise<SearchResult[]> {

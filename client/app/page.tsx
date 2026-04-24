@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search, Image as ImageIcon, Sparkles, Loader2, ArrowRight, Play } from "lucide-react";
 import Link from "next/link";
-import { searchImages, SearchResult, getVideoFrames, VideoFrame, trackObject, detectObject, TrackResult, checkBackendHealth, waitForBackend } from "@/lib/api";
+import { searchImages, SearchResult, getVideoFrames, VideoFrame, trackObject, detectObject, TrackResult, checkBackendHealth, waitForBackend, checkBackendReady, waitForBackendReady } from "@/lib/api";
 
 export default function Home() {
     const [query, setQuery] = useState("");
@@ -26,13 +26,13 @@ export default function Home() {
 
     useEffect(() => {
         let cancelled = false;
-        checkBackendHealth().then(ok => {
+        checkBackendReady().then(ok => {
             if (cancelled) return;
             if (ok) {
                 setBackendReady(true);
             } else {
                 setBackendReady(false);
-                waitForBackend().then(() => { if (!cancelled) setBackendReady(true); })
+                waitForBackendReady().then(() => { if (!cancelled) setBackendReady(true); })
                     .catch(() => { if (!cancelled) setBackendReady(false); });
             }
         });
