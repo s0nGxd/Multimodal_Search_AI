@@ -58,7 +58,7 @@ class IngestionService:
             exists = (
                 any(df['photo_id'] == original_id)
                 or any(df['photo_id'].str.startswith(f"{original_id}_", na=False))
-                or any(df['video_url'].str.contains(original_id, na=False, regex=False))
+                or any(df['video_url'].str.contains(f"/{original_id}_", na=False, regex=False))
             )
             if exists:
                 print(f"Skipping {filename}: already exists in database.")

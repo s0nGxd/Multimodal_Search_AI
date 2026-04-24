@@ -89,7 +89,10 @@ export default function Home() {
         let cancelled = false;
         let seekEpoch = 0;
 
-        const onSeeking = () => { seekEpoch += 1; };
+        const onSeeking = () => {
+            seekEpoch += 1;
+            trackStates.current.clear();
+        };
         video.addEventListener('seeking', onSeeking);
 
         const tick = async () => {
