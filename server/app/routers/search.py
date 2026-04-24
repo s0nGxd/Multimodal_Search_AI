@@ -19,6 +19,7 @@ class SearchResult(BaseModel):
     photo_image_url: str
     video_url: Optional[str] = None
     timestamp: Optional[float] = None
+    best_timestamp: Optional[float] = None
     description: Optional[str] = None
     score: float
 
@@ -118,6 +119,7 @@ async def search_images(req: SearchRequest):
                 "photo_image_url": url,
                 "video_url": v_url if v_url else None,
                 "timestamp": float(r.get("timestamp", 0.0)) if pd.notna(r.get("timestamp")) else None,
+                "best_timestamp": float(r.get("best_timestamp")) if r.get("best_timestamp") is not None else None,
                 "description": r.get("description", ""),
                 "score": float(score)
             })
