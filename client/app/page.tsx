@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search, Image as ImageIcon, Sparkles, Loader2, ArrowRight, Play } from "lucide-react";
 import Link from "next/link";
-import { searchImages, SearchResult, getVideoFrames, VideoFrame, trackObject, TrackResult, checkBackendHealth, waitForBackend } from "@/lib/api";
+import { searchImages, SearchResult, getVideoFrames, VideoFrame, trackObject, detectObject, TrackResult, checkBackendHealth, waitForBackend } from "@/lib/api";
 
 export default function Home() {
     const [query, setQuery] = useState("");
@@ -54,13 +54,29 @@ export default function Home() {
                 setVideoFrames([]);
             }
 
-            // TRIGGER INITIAL SCAN: Fix for static images and background objects
             if (query && hasSearched) {
                 lastDetectTime.current = 0;
-                // We use the original high-res URL for the initial static scan
-                trackObject(focusedImage.photo_image_url, query, focusedImage.video_url, focusedImage.video_url)
-                    .then(res => setBboxes(res.tracks || []))
-                    .catch(console.error);
+                if (focusedImage.video_url) {
+                    // Video: use stateful tracker from the start (matches subsequent timeupdate ticks)
+                    trackObject(focusedImage.photo_image_url, query, focusedImage.video_url, focusedImage.video_url)
+                        .then(res => setBboxes(res.tracks || []))
+                        .catch(console.error);
+                } else {
+                    // Still image: single-shot stateless detection — no tracker hysteresis
+                    detectObject(focusedImage.photo_image_url, query)
+                        .then(res => {
+                            if (res && res.box) {
+                                setBboxes([{
+                                    track_id: 0,
+                                    bbox: res.box as [number, number, number, number],
+                                    score: res.score ?? 0,
+                                }]);
+                            } else {
+                                setBboxes([]);
+                            }
+                        })
+                        .catch(console.error);
+                }
             }
         }
     }, [focusedImage]);
