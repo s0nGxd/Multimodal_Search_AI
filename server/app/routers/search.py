@@ -68,13 +68,13 @@ def list_all_images():
             search_service.refresh_table()
             if search_service.table is None:
                 return []
-        # Select only the columns we need — skip the 768-dim vector column
-        # (~6 KB/row of wasted bandwidth and memory).
-        df = search_service.table.to_pandas(columns=[
-            "photo_id", "photo_image_url", "video_url", "timestamp",
-        ])
+        df = search_service.table.to_pandas()
         if df.empty:
             return []
+        # Project down to just the columns we render; the vector column rides
+        # along in-memory but isn't shuffled through the response.
+        keep_cols = [c for c in ("photo_id", "photo_image_url", "video_url", "timestamp") if c in df.columns]
+        df = df[keep_cols].copy()
 
         # Vectorized URL rewriting: prefix BACKEND_URL onto /images/* URLs.
         photo_urls = df["photo_image_url"].astype(str)
