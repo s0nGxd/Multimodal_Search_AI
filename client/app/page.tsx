@@ -402,9 +402,9 @@ export default function Home() {
                                         autoPlay
                                         className="max-h-[70vh] w-auto"
                                         onLoadedMetadata={(e) => {
-                                            if (focusedImage.timestamp) {
-                                                e.currentTarget.currentTime = focusedImage.timestamp;
-                                                lastDetectTime.current = focusedImage.timestamp;
+                                            const ts = focusedImage.best_timestamp;
+                                            if (typeof ts === 'number' && ts > 0) {
+                                                e.currentTarget.currentTime = ts;
                                             }
                                         }}
                                     />
