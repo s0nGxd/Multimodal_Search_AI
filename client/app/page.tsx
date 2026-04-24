@@ -18,7 +18,6 @@ export default function Home() {
     const [bboxes, setBboxes] = useState<TrackResult[]>([]);
     const videoRef = useRef<HTMLVideoElement>(null);
     const lastDetectTime = useRef<number>(0);
-    const [isDetecting, setIsDetecting] = useState(false);
     const [videoFrames, setVideoFrames] = useState<VideoFrame[]>([]);
     const [currentDescription, setCurrentDescription] = useState("");
     
@@ -81,83 +80,81 @@ export default function Home() {
         }
     }, [focusedImage]);
 
-    const handleTimeUpdate = async () => {
+    useEffect(() => {
+        if (!focusedImage?.video_url || !query || !hasSearched) return;
         const video = videoRef.current;
-        if (!video || !query || !focusedImage) return;
+        if (!video) return;
 
-        const now = video.currentTime;
+        let inFlight = false;
+        let cancelled = false;
+        let seekEpoch = 0;
 
-        if (!isDetecting && Math.abs(now - lastDetectTime.current) >= 0.2) {
-            lastDetectTime.current = now;
-            setIsDetecting(true);
+        const onSeeking = () => { seekEpoch += 1; };
+        video.addEventListener('seeking', onSeeking);
+
+        const tick = async () => {
+            if (cancelled || inFlight) return;
+            if (video.paused || video.ended || video.readyState < 2) return;
+            inFlight = true;
 
             try {
                 const canvas = document.createElement("canvas");
-                const MAX_WIDTH = 480; 
+                const MAX_WIDTH = 480;
                 const scale = Math.min(1.0, MAX_WIDTH / video.videoWidth);
                 canvas.width = video.videoWidth * scale;
                 canvas.height = video.videoHeight * scale;
-                
+
                 const ctx = canvas.getContext("2d");
-                if (ctx && canvas.width > 0) {
-                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                    const base64Image = canvas.toDataURL("image/jpeg", 0.3);
-                    
-                    const requestStartTime = now;
-                    const result = await trackObject(
-                        focusedImage.photo_image_url,
-                        query,
-                        focusedImage.video_url,
-                        focusedImage.video_url,
-                        base64Image
-                    );
-                    
-                    if (result && result.tracks) {
-                        const latency = video.currentTime - requestStartTime;
-                        
-                        const updatedTracks = result.tracks.map((t: TrackResult) => {
-                            const prev = trackStates.current.get(t.track_id);
-                            let predictedBox = [...t.bbox];
+                if (!ctx || canvas.width === 0) return;
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const base64Image = canvas.toDataURL("image/jpeg", 0.5);
 
-                            if (prev) {
-                                const dt = now - prev.lastTime;
-                                if (dt > 0 && dt < 1.0) {
-                                    const velocity = t.bbox.map((val, i) => (val - prev.lastBox[i]) / dt);
-                                    
-                                    // DAMPED PREDICTION: We reduce the prediction weight (0.4) 
-                                    // to prevent the box from "overshooting" when objects stop suddenly.
-                                    const DAMPING = 0.4;
-                                    predictedBox = t.bbox.map((val, i) => val + (velocity[i] * latency * DAMPING));
-                                }
+                const videoId = `${focusedImage.video_url}#seek-${seekEpoch}`;
+                const now = video.currentTime;
+                const result = await trackObject(
+                    focusedImage.photo_image_url,
+                    query,
+                    focusedImage.video_url,
+                    videoId,
+                    base64Image,
+                );
+
+                if (cancelled) return;
+
+                if (result && result.tracks) {
+                    const latency = video.currentTime - now;
+                    const updatedTracks = result.tracks.map((t: TrackResult) => {
+                        const prev = trackStates.current.get(t.track_id);
+                        let predictedBox = [...t.bbox];
+                        if (prev) {
+                            const dt = now - prev.lastTime;
+                            if (dt > 0 && dt < 1.0) {
+                                const velocity = t.bbox.map((val, i) => (val - prev.lastBox[i]) / dt);
+                                const DAMPING = 0.4;
+                                predictedBox = t.bbox.map((val, i) => val + (velocity[i] * latency * DAMPING));
                             }
-
-                            trackStates.current.set(t.track_id, { lastBox: t.bbox, lastTime: now });
-                            return { ...t, bbox: predictedBox as [number, number, number, number] };
-                        });
-
-                        setBboxes(updatedTracks);
-                    } else {
-                        setBboxes([]);
-                    }
+                        }
+                        trackStates.current.set(t.track_id, { lastBox: t.bbox, lastTime: now });
+                        return { ...t, bbox: predictedBox as [number, number, number, number] };
+                    });
+                    setBboxes(updatedTracks);
+                } else {
+                    setBboxes([]);
                 }
             } catch (err) {
                 console.error("Tracking update failed:", err);
             } finally {
-                setIsDetecting(false);
+                inFlight = false;
             }
-        }
+        };
 
-        if (videoFrames.length > 0) {
-            let closest = videoFrames[0];
-            for (const f of videoFrames) {
-                if (f.timestamp <= now) closest = f;
-                else break;
-            }
-            if (closest && closest.description !== currentDescription) {
-                setCurrentDescription(closest.description);
-            }
-        }
-    };
+        const handle = setInterval(tick, 500);
+        return () => {
+            cancelled = true;
+            clearInterval(handle);
+            video.removeEventListener('seeking', onSeeking);
+        };
+    }, [focusedImage, query, hasSearched]);
 
     const handleSearch = async (e?: React.FormEvent) => {
         if (e) e.preventDefault();
@@ -410,7 +407,6 @@ export default function Home() {
                                                 lastDetectTime.current = focusedImage.timestamp;
                                             }
                                         }}
-                                        onTimeUpdate={handleTimeUpdate}
                                     />
                                 ) : (
                                     <img
