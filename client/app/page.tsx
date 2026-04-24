@@ -156,6 +156,13 @@ export default function Home() {
         };
     }, [focusedImage, query, hasSearched]);
 
+    const formatMMSS = (s: number): string => {
+        const total = Math.max(0, Math.floor(s));
+        const m = Math.floor(total / 60);
+        const sec = total % 60;
+        return `${m}:${sec.toString().padStart(2, '0')}`;
+    };
+
     const handleSearch = async (e?: React.FormEvent) => {
         if (e) e.preventDefault();
         if (!query.trim()) return;
@@ -347,11 +354,18 @@ export default function Home() {
                                         decoding="async"
                                     />
                                     {img.video_url && (
-                                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-                                            <div className="w-12 h-12 bg-black/50 rounded-full flex items-center justify-center backdrop-blur-md border border-white/10 shadow-xl">
-                                                <Play className="w-5 h-5 text-white ml-1 fill-white" />
+                                        <>
+                                            <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+                                                <div className="w-12 h-12 bg-black/50 rounded-full flex items-center justify-center backdrop-blur-md border border-white/10 shadow-xl">
+                                                    <Play className="w-5 h-5 text-white ml-1 fill-white" />
+                                                </div>
                                             </div>
-                                        </div>
+                                            <div className="absolute top-2 left-2 z-10 text-[10px] px-2 py-1 rounded-full bg-black/60 text-white/90 border border-white/10 backdrop-blur-md font-mono">
+                                                {typeof img.best_timestamp === 'number'
+                                                    ? `video @ ${formatMMSS(img.best_timestamp)}`
+                                                    : 'video'}
+                                            </div>
+                                        </>
                                     )}
                                     <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
                                         <div className="flex justify-between items-center mb-1.5">
