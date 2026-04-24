@@ -13,6 +13,7 @@ export interface SearchResult {
     photo_image_url: string;
     video_url?: string;
     timestamp?: number;
+    best_timestamp?: number;
     description?: string;
     score?: number;
 }
