@@ -51,8 +51,15 @@ class IngestionService:
         original_id = Path(filename).stem
         if search_service.table is not None:
             df = search_service.table.to_pandas()
-            # Check if photo_id or video_url contains this stem
-            exists = any(df['photo_id'] == original_id) or any(df['video_url'].str.contains(filename, na=False))
+            # Match stored photo_id patterns:
+            #   still image: "<stem>_<timestamp>"
+            #   video frame: "<stem>_frame_<n>"
+            # Also match stored video_url which contains the original stem as a substring.
+            exists = (
+                any(df['photo_id'] == original_id)
+                or any(df['photo_id'].str.startswith(f"{original_id}_", na=False))
+                or any(df['video_url'].str.contains(original_id, na=False, regex=False))
+            )
             if exists:
                 print(f"Skipping {filename}: already exists in database.")
                 return {"id": original_id, "status": "skipped", "message": "Already exists"}
