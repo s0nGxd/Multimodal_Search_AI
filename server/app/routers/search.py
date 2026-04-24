@@ -37,7 +37,7 @@ class VideoFrameInfo(BaseModel):
     description: str
 
 @router.get("/video/frames", response_model=List[VideoFrameInfo])
-async def get_video_frames(url: str):
+def get_video_frames(url: str):
     try:
         if search_service.table is None:
             return []
@@ -62,36 +62,48 @@ async def get_video_frames(url: str):
         return []
 
 @router.get("/images/all")
-async def list_all_images():
+def list_all_images():
     try:
         if search_service.table is None:
             search_service.refresh_table()
             if search_service.table is None:
                 return []
-        df = search_service.table.to_pandas()
+        # Select only the columns we need — skip the 768-dim vector column
+        # (~6 KB/row of wasted bandwidth and memory).
+        df = search_service.table.to_pandas(columns=[
+            "photo_id", "photo_image_url", "video_url", "timestamp",
+        ])
+        if df.empty:
+            return []
+
+        # Vectorized URL rewriting: prefix BACKEND_URL onto /images/* URLs.
+        photo_urls = df["photo_image_url"].astype(str)
+        df["photo_image_url"] = photo_urls.where(
+            ~photo_urls.str.startswith("/images/"),
+            BACKEND_URL + photo_urls,
+        )
+        video_urls = df["video_url"].fillna("").astype(str)
+        df["video_url"] = video_urls.where(
+            ~video_urls.str.startswith("/images/"),
+            BACKEND_URL + video_urls,
+        )
+
+        # Dedup videos (one card per video), keep all standalone photos.
+        has_video = df["video_url"].astype(str).str.len().gt(0)
+        videos = df[has_video].drop_duplicates(subset=["video_url"], keep="first")
+        photos = df[~has_video]
+        combined = pd.concat([photos, videos], ignore_index=True)
+
         results = []
-        seen_videos = set()
-        for _, row in df.iterrows():
-            v_url = row.get("video_url", "")
-            
-            if v_url and isinstance(v_url, str) and v_url.strip():
-                if v_url in seen_videos:
-                    continue
-                seen_videos.add(v_url)
-            
-            url = row["photo_image_url"]
-            if url.startswith("/images/"):
-                url = f"{BACKEND_URL}{url}"
-                
-            if v_url and isinstance(v_url, str) and v_url.startswith("/images/"):
-                v_url = f"{BACKEND_URL}{v_url}"
-                
+        for row in combined.itertuples(index=False):
+            v_url = row.video_url if row.video_url else None
+            ts = row.timestamp
             results.append({
-                "photo_id": row["photo_id"],
-                "photo_image_url": url,
-                "video_url": v_url if v_url else None,
-                "timestamp": float(row.get("timestamp", 0.0)) if pd.notna(row.get("timestamp")) else None,
-                "description": row.get("description", ""),
+                "photo_id": row.photo_id,
+                "photo_image_url": row.photo_image_url,
+                "video_url": v_url,
+                "timestamp": float(ts) if pd.notna(ts) else None,
+                "description": "",
             })
         return results
     except Exception as e:
@@ -99,7 +111,7 @@ async def list_all_images():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/search", response_model=List[SearchResult])
-async def search_images(req: SearchRequest):
+def search_images(req: SearchRequest):
     try:
         results = search_service.search(req.query, req.k, req.threshold)
         response = []
@@ -139,7 +151,7 @@ class TrackResponse(BaseModel):
     tracks: List[Dict] = [] 
 
 @router.post("/track", response_model=TrackResponse)
-async def track_object(req: TrackRequest):
+def track_object(req: TrackRequest):
     try:
         from app.services.tracking_service import tracking_service
         import io
@@ -176,7 +188,7 @@ async def track_object(req: TrackRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/detect", response_model=DetectResponse)
-async def detect_object(req: DetectRequest):
+def detect_object(req: DetectRequest):
     try:
         from app.services.detection_service import detection_service
         import io
