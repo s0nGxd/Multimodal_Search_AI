@@ -90,3 +90,11 @@ desktop.ini
 # ── HuggingFace Model Cache (can be very large) ───────────────
 ~/.cache/huggingface/
 .cache/
+
+# ── Claude Code internal state (per-developer) ────────────────
+.claude/
+CLAUDE.md
+
+# ── Confidential coursework artifacts (visible to industry client otherwise) ──
+DOCUMENTATION/Peer Assessments/
+DOCUMENTATION/Ethics Application Form*.pdf
