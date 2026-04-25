@@ -96,5 +96,7 @@ desktop.ini
 CLAUDE.md
 
 # ── Confidential coursework artifacts (visible to industry client otherwise) ──
-DOCUMENTATION/Peer Assessments/
-DOCUMENTATION/Ethics Application Form*.pdf
+University/
+
+# ── Local deploy workspaces (sibling clones, not part of the project) ────────
+hf-space/

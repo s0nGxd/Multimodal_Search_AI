@@ -15,6 +15,22 @@ Install these once on your machine:
 
 ## Setup (First Time Only)
 
+### Environment files
+
+Before installing dependencies, set up the env files:
+
+```bash
+# Backend
+cp server/.env.example server/.env
+
+# Frontend (only needed if you want the Gemini parser + VLM features locally)
+# Create client/.env.local with:
+#   GOOGLE_PROJECT_ID=...
+#   GOOGLE_CLIENT_EMAIL=...
+#   GOOGLE_PRIVATE_KEY=...
+# (ask Aariz for the values, or skip this and the app falls back to basic search)
+```
+
 ### Backend
 
 **Windows (PowerShell)**
@@ -130,6 +146,19 @@ Each search query runs three channels in parallel and fuses them with **Reciproc
 3. **BM25 keyword** — exact keyword match on image descriptions
 
 The `% Match` score shown in the UI reflects how highly an image ranked across **all three channels combined** — not just geometric distance.
+
+---
+
+## Access to deployed services
+
+Production runs on Aariz's accounts. If you want push/deploy access, message Aariz with your username on the relevant platform and he'll add you:
+
+- **HuggingFace Space (backend):** `aariz-s/segp-siglip-search` — send your HF username, get added with Write permission. Then you can `git push` to the Space's repo.
+- **HuggingFace Dataset (LanceDB + indexed images):** `aariz-s/segp-siglip-data` — same drill. Send your HF username.
+- **Vercel (frontend):** the project is on Aariz's personal Vercel team. Deployments are manual via `vercel --prod --yes`. Ask Aariz to deploy or to invite you.
+- **Vertex AI / Gemini credentials:** ask Aariz for the `GOOGLE_*` env vars to enable the parser and VLM re-rank features locally.
+
+Don't have an HF account? Sign up free at https://huggingface.co/join.
 
 ---
 
