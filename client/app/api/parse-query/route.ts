@@ -22,24 +22,32 @@ export type SearchPlan = z.infer<typeof PlanSchema>;
 
 const SYSTEM = `You convert a natural-language image-search query into a structured plan.
 
-Mode rules:
-- "X or Y", "X OR Y" -> mode:"OR", two clauses
-- "X and Y", "X with Y", "X near Y", "X next to Y", "X on Y" -> mode:"AND", one clause per object
-- "not X", "without X", "no X" -> that clause has negated:true; keep it as a clause of the same mode
-- Strip filler: "a photo of", "an image of", "picture showing", etc.
-- Simple single noun phrase -> mode:"SINGLE" with one clause
+The plan is used by a retrieval pipeline. Downstream a vision-language model verifies actions and relationships, so DO NOT decompose action or relational queries into multiple entities. SigLIP ranks best on whole-phrase scenes — keep action phrases intact as one clause.
 
-Object vs attribute extraction (IMPORTANT):
-- "object" is the BARE head noun only — the thing itself.
-- "attributes" is an array containing every modifier: colors, materials, sizes, actions, clothing, adjacent items.
-- Examples:
-  * "red car"              -> object:"car", attributes:["red"]
-  * "white van"            -> object:"van", attributes:["white"]
-  * "man in blue jacket"   -> object:"man", attributes:["blue jacket"]
-  * "black SUV with tinted windows" -> object:"SUV", attributes:["black", "tinted windows"]
-  * "woman carrying a red backpack" -> object:"woman", attributes:["carrying a red backpack"]
-  * "ambulance"            -> object:"ambulance", attributes:[]
-- If the word is itself already a specific compound noun (e.g. "police car"), keep it intact as the object.`;
+Mode rules:
+- "X or Y", "X OR Y" -> mode:"OR", two clauses (true disjunction only)
+- "not X", "without X", "no X" -> that clause has negated:true; keep mode of surrounding phrase
+- Explicit conjunctions of DISTINCT scenes/subjects like "picture of a cat AND a dog where they are far apart" -> mode:"AND" — only when the user literally joins two independent entities
+- Everything else — action queries, descriptive queries, attribute queries, single-noun queries -> mode:"SINGLE" with ONE clause containing the full phrase
+
+Examples (SINGLE):
+- "a guy getting in a car"           -> SINGLE: [{object:"a guy getting in a car", attributes:[]}]
+- "woman holding a phone"            -> SINGLE: [{object:"woman holding a phone", attributes:[]}]
+- "child in a red shirt and black cap" -> SINGLE: [{object:"child", attributes:["red shirt", "black cap"]}]
+- "red car"                          -> SINGLE: [{object:"car", attributes:["red"]}]
+- "ambulance"                        -> SINGLE: [{object:"ambulance", attributes:[]}]
+- "white van on a highway"           -> SINGLE: [{object:"van on a highway", attributes:["white"]}]
+
+Examples (OR / NOT):
+- "dog or cat"                       -> OR: [{object:"dog"}, {object:"cat"}]
+- "person not wearing a hat"         -> SINGLE with negated clause handled by downstream; keep positive intact
+
+Object vs attribute extraction (ONLY when the object is a simple head noun):
+- If the phrase is a simple noun with color/state modifiers, extract attributes: "red car" -> object:"car", attributes:["red"].
+- If the phrase describes an action or scene, put the ENTIRE phrase in "object" with attributes:[].
+- When in doubt, prefer putting more into "object" and less into attributes. Losing the action is worse than losing a descriptor.
+
+Strip filler ("a photo of", "an image of", "picture of").`;
 
 export async function POST(req: NextRequest) {
     try {
