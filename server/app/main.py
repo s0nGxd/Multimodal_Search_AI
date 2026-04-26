@@ -1,3 +1,8 @@
+# Load .env before any service module imports, so os.getenv() at module-load
+# time in persistence_service / search_service / etc. sees the values.
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -27,7 +32,7 @@ app = FastAPI(title="SEGP Semantic Search API", lifespan=lifespan)
 # CORS Setup — configurable for deployment
 # Locally: defaults to localhost:3000
 # Deployed: set ALLOWED_ORIGINS env var to your frontend URL (comma-separated)
-default_origins = "http://localhost:3000,http://127.0.0.1:3000,https://client-nine-xi-31.vercel.app"
+default_origins = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001,https://client-nine-xi-31.vercel.app"
 origins = os.getenv("ALLOWED_ORIGINS", default_origins).split(",")
 # Include any Vercel preview/production URLs
 origins = [o.strip() for o in origins if o.strip()]

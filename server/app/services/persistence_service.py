@@ -18,6 +18,10 @@ HF_DATASET_REPO = os.getenv("HF_DATASET_REPO", "")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 DATA_DIR = os.getenv("DATA_DIR", "data")
 LANCEDB_URI = os.getenv("LANCEDB_URI", "./lancedb_db")
+# Read-only mode: restore from repo on boot, but never push back. Used for
+# local diagnosis against a snapshot of prod data without risk of polluting
+# the live dataset.
+READ_ONLY = os.getenv("PERSISTENCE_READ_ONLY", "").lower() in ("1", "true", "yes")
 
 # Lock to prevent concurrent syncs
 _sync_lock = threading.Lock()
@@ -39,7 +43,8 @@ def restore_from_repo():
         print("[Persistence] Not configured (HF_DATASET_REPO or HF_TOKEN missing). Skipping restore.")
         return
 
-    print(f"[Persistence] Restoring data from repo: {HF_DATASET_REPO}")
+    mode = "READ-ONLY" if READ_ONLY else "READ-WRITE"
+    print(f"[Persistence] Restoring data from repo: {HF_DATASET_REPO} ({mode})")
     try:
         # snapshot_download pulls the entire repo into a local cache
         # and returns the path to the cached directory
@@ -81,11 +86,15 @@ def restore_from_repo():
 
 def sync_to_repo():
     """Push current data to HF Dataset repo.
-    
+
     Called after each successful ingestion. Runs in a background
     thread so it doesn't block the API response.
     """
     if not is_configured():
+        return
+
+    if READ_ONLY:
+        print("[Persistence] READ_ONLY=1 — skipping sync to repo.")
         return
 
     def _sync():
