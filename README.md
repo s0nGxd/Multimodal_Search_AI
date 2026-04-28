@@ -73,12 +73,14 @@ You need **two terminals** open simultaneously.
 **Windows**
 ```powershell
 cd server
+.\.venv\Scripts\Activate.ps1
 python -m uvicorn app.main:app --reload --port 8000
 ```
 
 **Mac / Linux**
 ```bash
 cd server
+source .venv/bin/activate
 python3 -m uvicorn app.main:app --reload --port 8000
 ```
 
