@@ -16,13 +16,9 @@ async def lifespan(app):
     restore_from_repo()
     try:
         from app.services.search_service import search_service
-        from app.services.detection_service import detection_service
-        from PIL import Image
-        # Dummy forward pass on both models so first real query is fast
+        # Dummy forward pass on SigLIP so first real query is fast
         _ = search_service.embed_text("warmup")
-        dummy = Image.new("RGB", (64, 64), color=(0, 0, 0))
-        _ = detection_service.detect(dummy, "warmup")
-        print("Models warmed up (SigLIP + OWL-ViT).")
+        print("Models warmed up (SigLIP).")
     except Exception as e:
         print(f"Model warmup skipped/failed: {e}")
     yield
@@ -78,11 +74,7 @@ async def health_check():
 async def readiness_check():
     try:
         from app.services.search_service import search_service
-        from app.services.detection_service import detection_service
-        from PIL import Image
         _ = search_service.embed_text("ready")
-        dummy = Image.new("RGB", (64, 64), color=(0, 0, 0))
-        _ = detection_service.detect(dummy, "ready")
         return {"status": "ready", "service": "semantic-search-api"}
     except Exception as e:
         from fastapi import Response

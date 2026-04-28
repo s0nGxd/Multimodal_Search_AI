@@ -1,8 +1,12 @@
 # Core AI/ML
-transformers>=4.44.0
+transformers>=4.48.0
 safetensors>=0.4.0
 torch>=2.3.0
 torchvision>=0.18.0
+ultralytics
+sahi
+timm
+einops
 
 # Vector Database
 lancedb>=0.9.0

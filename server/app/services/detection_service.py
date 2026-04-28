@@ -17,12 +17,30 @@ class DetectionService:
         print("Initializing DetectionService (OWL-ViT)...")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model_name = "google/owlvit-base-patch32"
+        self.processor = None
+        self.model = None
+
+    def load_model(self):
+        if self.model is not None:
+            return
+        print(f"Loading detection model: {self.model_name}")
         self.processor = OwlViTProcessor.from_pretrained(self.model_name)
         self.model = OwlViTForObjectDetection.from_pretrained(self.model_name, use_safetensors=True).to(self.device)
         self.model.eval()
 
+    def unload_model(self):
+        print(f"Unloading detection model: {self.model_name}")
+        self.model = None
+        self.processor = None
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     @torch.no_grad()
     def detect(self, image: Image.Image, query: str):
+        self.load_model()
         # We query with multiple contextual strings to improve recall for partial objects
         texts = [[f"a photo of a {query}", f"{query}", f"a {query}"]]
         inputs = self.processor(text=texts, images=image, return_tensors="pt").to(self.device)

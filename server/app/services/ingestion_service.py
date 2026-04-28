@@ -1,11 +1,15 @@
 import os
 import io
+import json
+import gc
+import torch
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 import requests
 import pandas as pd
+import numpy as np
 from PIL import Image
 import lancedb
 from lancedb.pydantic import LanceModel, Vector
@@ -15,6 +19,12 @@ from .search_service import search_service
 from .persistence_service import sync_to_repo
 
 load_dotenv()
+
+def clear_vram():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 # Must match the embedding dimension of the configured model.
 # SigLIP base-patch16-256 (default) → 768. CLIP base-patch32 → 512.
@@ -27,6 +37,7 @@ class ImageRecord(LanceModel):
     video_url: str = ""
     timestamp: float = 0.0
     vector: Vector(EMBED_DIM)
+    objects_json: str = "[]"
 
 
 _DL_HEADERS = {
@@ -55,20 +66,24 @@ class IngestionService:
         # 1. Check if this file (by original stem) already exists in DB
         # This prevents re-indexing the same file multiple times
         original_id = Path(filename).stem
-        if search_service.table is not None:
-            df = search_service.table.to_pandas()
-            # Match stored photo_id patterns:
-            #   still image: "<stem>_<timestamp>"
-            #   video frame: "<stem>_frame_<n>"
-            # Also match stored video_url which contains the original stem as a substring.
-            exists = (
-                any(df['photo_id'] == original_id)
-                or any(df['photo_id'].str.startswith(f"{original_id}_", na=False))
-                or any(df['video_url'].str.contains(f"/{original_id}_", na=False, regex=False))
-            )
-            if exists:
-                print(f"Skipping {filename}: already exists in database.")
-                return {"id": original_id, "status": "skipped", "message": "Already exists"}
+        try:
+            if search_service.table is not None:
+                df = search_service.table.to_pandas()
+                # Match stored photo_id patterns:
+                #   still image: "<stem>_<timestamp>"
+                #   video frame: "<stem>_frame_<n>"
+                # Also match stored video_url which contains the original stem as a substring.
+                exists = (
+                    any(df['photo_id'] == original_id)
+                    or any(df['photo_id'].str.startswith(f"{original_id}_", na=False))
+                    or any(df['video_url'].str.contains(f"/{original_id}_", na=False, regex=False))
+                )
+                if exists:
+                    print(f"Skipping {filename}: already exists in database.")
+                    return {"id": original_id, "status": "skipped", "message": "Already exists"}
+        except Exception as e:
+            print(f"Warning: Could not check for duplicates (possible DB corruption): {e}")
+            search_service.refresh_table()
 
         # 2. Generate unique filename for storage safety
         timestamp = int(pd.Timestamp.now().timestamp())
@@ -85,72 +100,169 @@ class IngestionService:
         is_video = (mime_type and mime_type.startswith("video/")) or ext in [".mp4", ".mov", ".avi", ".webm", ".mkv"]
 
         if is_video:
-            return self._process_video_upload(file_path, unique_filename)
+            return self._run_ingestion_pipeline(file_path, unique_filename, is_video=True)
+        else:
+            return self._run_ingestion_pipeline(file_path, unique_filename, is_video=False)
 
-        try:
-            img = Image.open(file_path).convert("RGB")
-        except Exception as e:
-            if file_path.exists():
-                os.remove(file_path)
-            raise ValueError(f"Invalid image file: {e}")
-
-        vector = search_service.embed_image(img)
-
-        photo_url = f"/images/{unique_filename}"
-        record = ImageRecord(
-            photo_id=file_path.stem,
-            photo_image_url=photo_url,
-            vector=vector,
-        )
-        self._insert_records([record])
-        sync_to_repo()
-        return {"id": file_path.stem, "url": photo_url, "status": "indexed"}
-
-    def _process_video_upload(self, file_path: Path, filename: str):
+    def _run_ingestion_pipeline(self, file_path: Path, filename: str, is_video: bool):
         import cv2
-        cap = cv2.VideoCapture(str(file_path))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps <= 0:
-            fps = 30
-        
-        frames_to_extract = []
-        frame_interval = int(fps * 2) # 1 frame every 2 seconds
-        
-        count = 0
-        success, frame = cap.read()
-        while success:
-            if count % frame_interval == 0:
-                frames_to_extract.append((count, frame))
+        print(f"DEBUG: Processing upload: {filename}")
+        frames = [] # List of (timestamp, Image)
+
+        if is_video:
+            # --- STAGE 0: Frame Extraction (1 FPS) ---
+            print("DEBUG: Stage 0 - Extracting frames at 1 FPS")
+            cap = cv2.VideoCapture(str(file_path))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps <= 0:
+                fps = 30
+            count = 0
             success, frame = cap.read()
-            count += 1
-        cap.release()
+            while success:
+                if count % int(fps) == 0:
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    frames.append((float(count) / fps, Image.fromarray(frame_rgb)))
+                success, frame = cap.read()
+                count += 1
+            cap.release()
+        else:
+            # --- STAGE 0: Image Loading ---
+            print("DEBUG: Stage 0 - Loading image")
+            try:
+                img = Image.open(file_path).convert("RGB")
+                frames.append((0.0, img))
+            except Exception as e:
+                if file_path.exists():
+                    os.remove(file_path)
+                raise ValueError(f"Invalid image file: {e}")
         
-        if not frames_to_extract:
+        if not frames:
             if file_path.exists():
                 os.remove(file_path)
-            raise ValueError("Could not extract any frames from the video")
+            raise ValueError("Could not extract any data from the file")
             
-        records = []
-        for frame_idx, frame_data in frames_to_extract:
-            frame_rgb = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(frame_rgb)
-            
-            frame_filename = f"{file_path.stem}_frame_{frame_idx}.jpg"
-            frame_path = self.data_dir / frame_filename
-            img.save(frame_path)
-            
-            vector = search_service.embed_image(img)
+        # --- STAGE 1: SigLIP Scene Embedding ---
+        print(f"DEBUG: Stage 1 - Generating scene embeddings with SigLIP-2 for {len(frames)} frames")
+        search_service.load_model()
+        vectors = []
+        try:
+            for _, img in frames:
+                vectors.append(search_service.embed_image(img))
+        finally:
+            search_service.unload_model()
+            clear_vram()
 
-            photo_url = f"/images/{frame_filename}"
-            records.append(ImageRecord(
-                photo_id=f"{file_path.stem}_frame_{frame_idx}",
-                photo_image_url=photo_url,
-                video_url=f"/images/{filename}",
-                timestamp=float(frame_idx) / float(fps),
-                vector=vector,
-            ))
+        # --- STAGE 2: YOLO + SAHI Detection & Tracking ---
+        print("DEBUG: Stage 2 - Detecting objects with YOLOv8 + SAHI")
+        from ultralytics import YOLO
+        from sahi import AutoDetectionModel
+        from sahi.predict import get_sliced_prediction
+        
+        yolo_model = YOLO("yolov8n.pt")
+        detection_model = AutoDetectionModel.from_pretrained(
+            model_type="yolov8",
+            model=yolo_model,
+            confidence_threshold=0.25,
+            device="cuda" if torch.cuda.is_available() else "cpu"
+        )
+        
+        all_frame_objects = []
+        try:
+            for ts, img in frames:
+                result = get_sliced_prediction(
+                    img,
+                    detection_model,
+                    slice_height=512,
+                    slice_width=512,
+                    overlap_height_ratio=0.2,
+                    overlap_width_ratio=0.2,
+                    verbose=0
+                )
+                objs = []
+                for pred in result.object_prediction_list:
+                    # Filter for relevant classes
+                    cls = pred.category.name.lower()
+                    if cls in ["person", "bicycle", "car", "motorcycle", "bus", "truck", "dog", "cat", "horse", "sheep", "cow"]:
+                        objs.append({
+                            "class_name": cls,
+                            "bbox": pred.bbox.to_xyxy(),
+                            "score": float(pred.score.value),
+                            "track_id": 0 # Simple ID for now
+                        })
+                all_frame_objects.append(objs)
+        finally:
+            del detection_model
+            del yolo_model
+            clear_vram()
+
+        # --- STAGE 3: Florence-2 Attribute Extraction ---
+        print("DEBUG: Stage 3 - Extracting attributes with Florence-2")
+        from transformers import AutoProcessor, AutoModelForCausalLM
+        
+        f2_model_id = "microsoft/Florence-2-base"
+        f2_processor = AutoProcessor.from_pretrained(f2_model_id, trust_remote_code=True)
+        f2_model = AutoModelForCausalLM.from_pretrained(f2_model_id, trust_remote_code=True).to("cuda" if torch.cuda.is_available() else "cpu").eval()
+        
+        records = []
+        try:
+            for i, (ts, img) in enumerate(frames):
+                frame_objs = all_frame_objects[i]
+                for obj in frame_objs:
+                    x1, y1, x2, y2 = obj["bbox"]
+                    # Ensure bbox is within image bounds
+                    w, h = img.size
+                    x1, y1 = max(0, x1), max(0, y1)
+                    x2, y2 = min(w, x2), min(h, y2)
+                    
+                    if x2 <= x1 or y2 <= y1: continue
+
+                    # Normalize bbox for frontend [xmin, ymin, xmax, ymax]
+                    obj["bbox"] = [float(x1/w), float(y1/h), float(x2/w), float(y2/h)]
+                    
+                    crop = img.crop((x1, y1, x2, y2))
+                    
+                    # Florence-2 task-based captioning
+                    # The processor requires the task token to be the ONLY token in the text.
+                    if obj["class_name"] == "person":
+                        prompt = "<MORE_DETAILED_CAPTION>"
+                    elif obj["class_name"] in ["car", "bicycle", "motorcycle", "bus", "truck"]:
+                        prompt = "<DETAILED_CAPTION>"
+                    else: # Animals
+                        prompt = "<DETAILED_CAPTION>"
+                    
+                    inputs = f2_processor(text=prompt, images=crop, return_tensors="pt").to(f2_model.device)
+                    generated_ids = f2_model.generate(
+                        input_ids=inputs["input_ids"],
+                        pixel_values=inputs["pixel_values"],
+                        max_new_tokens=256,
+                        num_beams=3
+                    )
+                    response = f2_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+                    obj["attributes"] = response
+                
+                # Save frame image
+                if is_video:
+                    frame_filename = f"{file_path.stem}_frame_{i}.jpg"
+                    frame_path = self.data_dir / frame_filename
+                    img.save(frame_path)
+                else:
+                    frame_filename = filename
+                
+                records.append(ImageRecord(
+                    photo_id=f"{file_path.stem}_frame_{i}" if is_video else file_path.stem,
+                    photo_image_url=f"/images/{frame_filename}",
+                    video_url=f"/images/{filename}" if is_video else "",
+                    timestamp=ts,
+                    vector=vectors[i],
+                    objects_json=json.dumps(frame_objs)
+                ))
+        finally:
+            del f2_model
+            del f2_processor
+            clear_vram()
             
         if records:
+            print(f"DEBUG: Inserting {len(records)} frames into database")
             self._insert_records(records)
             sync_to_repo()
             
@@ -169,17 +281,13 @@ class IngestionService:
         except Exception as e:
             raise ValueError(f"Failed to fetch image from URL: {e}")
 
-        vector = search_service.embed_image(img)
-        pid = photo_id or f"remote_{hash(url)}"
+        # Generate unique filename
+        timestamp = int(pd.Timestamp.now().timestamp())
+        filename = f"url_{timestamp}.jpg"
+        file_path = self.data_dir / filename
+        img.save(file_path)
 
-        record = ImageRecord(
-            photo_id=pid,
-            photo_image_url=url,
-            vector=vector,
-        )
-        self._insert_records([record])
-        sync_to_repo()
-        return {"id": pid, "url": url, "status": "indexed"}
+        return self._run_ingestion_pipeline(file_path, filename, is_video=False)
 
     def process_bulk_csv(self, csv_path: str, limit: int = 100, max_workers: int = 3, batch_size: int = 16, offset: int = 0):
         try:

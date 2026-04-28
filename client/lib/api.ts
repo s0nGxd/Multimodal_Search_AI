@@ -209,16 +209,6 @@ export async function bulkIngest(limit: number = 50) {
     return res.json();
 }
 
-export async function detectObject(photo_image_url: string, query: string, base64_image?: string): Promise<DetectResult> {
-    const res = await fetch(`${API_BASE}/detect`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ photo_image_url, query, base64_image })
-    });
-    if (!res.ok) throw new Error('Detection failed');
-    return res.json();
-}
-
 export async function trackObject(
     photo_image_url: string,
     query: string,

@@ -100,27 +100,12 @@ export default function Home() {
             if (query && hasSearched) {
                 lastDetectTime.current = 0;
                 const detectQuery = detectionPhrase || query;
-                if (focusedImage.video_url) {
-                    // Video: use stateful tracker from the start (matches subsequent timeupdate ticks)
-                    trackObject(focusedImage.photo_image_url, detectQuery, focusedImage.video_url, focusedImage.video_url)
-                        .then(res => setBboxes(res.tracks || []))
-                        .catch(console.error);
-                } else {
-                    // Still image: single-shot stateless detection — no tracker hysteresis
-                    detectObject(focusedImage.photo_image_url, detectQuery)
-                        .then(res => {
-                            if (res && res.box) {
-                                setBboxes([{
-                                    track_id: 0,
-                                    bbox: res.box as [number, number, number, number],
-                                    score: res.score ?? 0,
-                                }]);
-                            } else {
-                                setBboxes([]);
-                            }
-                        })
-                        .catch(console.error);
-                }
+                
+                // Both images and videos now use the stateful tracker endpoint 
+                // which returns pre-computed boxes from LanceDB.
+                trackObject(focusedImage.photo_image_url, detectQuery, focusedImage.video_url || "", focusedImage.video_url || focusedImage.photo_id)
+                    .then(res => setBboxes(res.tracks || []))
+                    .catch(console.error);
             }
         }
     }, [focusedImage]);

@@ -68,20 +68,7 @@ class SearchResult(BaseModel):
     description: Optional[str] = None
     score: float
 
-class DetectRequest(BaseModel):
-    photo_image_url: str = ""
-    base64_image: str = None
-    query: str
-
-class DetectResponse(BaseModel):
-    box: Optional[List[float]] = None
-    score: Optional[float] = None
-
-class VideoFrameInfo(BaseModel):
-    timestamp: float
-    description: str
-
-@router.get("/video/frames", response_model=List[VideoFrameInfo])
+@router.get("/video/frames")
 def get_video_frames(url: str):
     try:
         if search_service.table is None:
@@ -134,9 +121,10 @@ def list_all_images():
         )
 
         # Dedup videos (one card per video), keep all standalone photos.
-        has_video = df["video_url"].astype(str).str.len().gt(0)
-        videos = df[has_video].drop_duplicates(subset=["video_url"], keep="first")
-        photos = df[~has_video]
+        # Single images have video_url == "" (or None/NaN)
+        is_video = df["video_url"].fillna("").str.len().gt(0)
+        videos = df[is_video].drop_duplicates(subset=["video_url"], keep="first")
+        photos = df[~is_video]
         combined = pd.concat([photos, videos], ignore_index=True)
 
         results = []
@@ -207,6 +195,15 @@ def search_complex(req: ComplexSearchRequest):
         def _run_clause(c: SearchClause, is_negative: bool = False) -> list[dict]:
             phrase = _phrase(c)
             has_attrs = bool(c.attributes)
+            
+            # Construct pre-filter for DataFusion fast metadata search
+            filters = [f"objects_json LIKE '%{c.object.lower()}%'"]
+            for attr in c.attributes:
+                # We split attributes to catch individual words if needed, 
+                # but for Florence-2 captions, whole phrase LIKE is often better.
+                filters.append(f"objects_json LIKE '%{attr.lower()}%'")
+            pre_filter = " AND ".join(filters)
+
             # Demo-mode tuning: top-3 @ 512px for attribute clauses (half the OWL-ViT cost),
             # top-5 @ 512px otherwise. Image detection down from 768->512 is ~2x speedup.
             cache_key = f"{phrase}|attr={int(has_attrs)}"
@@ -217,10 +214,7 @@ def search_complex(req: ComplexSearchRequest):
                 phrase,
                 per_clause_k,
                 threshold=0.0,
-                force_rerank=has_attrs,
-                boost_weight=0.95 if has_attrs else 0.80,
-                rerank_top=3 if has_attrs else 5,
-                rerank_size=512,
+                pre_filter=pre_filter,
             )
             _cache_put(cache_key, rows)
             return rows
@@ -328,72 +322,38 @@ class TrackResponse(BaseModel):
 @router.post("/track", response_model=TrackResponse)
 def track_object(req: TrackRequest):
     try:
-        from app.services.tracking_service import tracking_service
-        import io
-        import os
-        import base64
-        from PIL import Image
+        import json
         
-        if req.base64_image:
-            image_data = base64.b64decode(req.base64_image.split(",")[1] if "," in req.base64_image else req.base64_image)
-            img = Image.open(io.BytesIO(image_data)).convert("RGB")
-        else:
-            url = req.photo_image_url or (req.video_url or "")
-            if "/images/" in url:
-                file_name = url.split("/images/")[-1]
-                local_path = os.path.join(os.getenv("DATA_DIR", "data"), file_name)
-                if os.path.exists(local_path):
-                    img = Image.open(local_path).convert("RGB")
-                else:
-                    raise FileNotFoundError(f"Local image not found: {local_path}")
-            else:
-                import requests
-                r = requests.get(url, timeout=10)
-                r.raise_for_status()
-                img = Image.open(io.BytesIO(r.content)).convert("RGB")
-        
-        video_id = req.video_id or req.video_url or req.photo_image_url
-        tracking_service.reset_for_new_video(video_id, req.query)
-        
-        tracks = tracking_service.detect_and_track(img, req.query, return_all_detections=True)
-        
-        return TrackResponse(tracks=tracks)
-    except Exception as e:
-        print(f"Tracking error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/detect", response_model=DetectResponse)
-def detect_object(req: DetectRequest):
-    try:
-        from app.services.detection_service import detection_service
-        import io
-        import os
-        import base64
-        from PIL import Image
-        
-        if req.base64_image:
-            image_data = base64.b64decode(req.base64_image.split(",")[1] if "," in req.base64_image else req.base64_image)
-            img = Image.open(io.BytesIO(image_data)).convert("RGB")
-        else:
+        # Try to fetch pre-computed objects from LanceDB
+        if search_service.table is not None:
             url = req.photo_image_url
             if "/images/" in url:
-                file_name = url.split("/images/")[-1]
-                local_path = os.path.join(os.getenv("DATA_DIR", "data"), file_name)
-                if os.path.exists(local_path):
-                    img = Image.open(local_path).convert("RGB")
-                else:
-                    raise FileNotFoundError(f"Local image not found: {local_path}")
-            else:
-                import requests
-                r = requests.get(url, timeout=10)
-                r.raise_for_status()
-                img = Image.open(io.BytesIO(r.content)).convert("RGB")
-        
-        # USE FULL QUALITY for image detection
-        result = detection_service.detect(img, req.query)
-        if result:
-            return DetectResponse(box=result["box"], score=result["score"])
-        return DetectResponse(box=None, score=None)
+                url_path = f"/images/{url.split('/images/')[-1]}"
+                df = search_service.table.to_pandas()
+                match = df[df["photo_image_url"] == url_path]
+                if not match.empty:
+                    objs_json = match.iloc[0].get("objects_json", "[]")
+                    objs = json.loads(objs_json)
+                    
+                    tracks = []
+                    q_words = req.query.lower().strip().split()
+                    for idx, o in enumerate(objs):
+                        # Combine class and attributes for full-text search
+                        text_to_search = (o["class_name"] + " " + o.get("attributes", "")).lower()
+                        
+                        # Match only if ALL words from the query are found in the object description
+                        if all(word in text_to_search for word in q_words):
+                            tracks.append({
+                                "track_id": idx, # Use index for unique React key
+                                "bbox": o["bbox"], # [xmin, ymin, xmax, ymax] normalized
+                                "score": o.get("score", 1.0)
+                            })
+                    if tracks:
+                        print(f"DEBUG: Returning {len(tracks)} pre-computed tracks for {url_path}")
+                        return TrackResponse(tracks=tracks)
+
+        print(f"DEBUG: No pre-computed tracks found for {req.photo_image_url}")
+        return TrackResponse(tracks=[])
     except Exception as e:
-        print(f"Detection error: {e}")
+        print(f"Tracking error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
