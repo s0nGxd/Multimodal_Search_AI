@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Loader2 } from "lucide-react";
 import Link from "next/link";
-import { searchImages, searchComplex, parseQuery, vlmRerank, SearchResult, getVideoFrames, VideoFrame, trackObject, detectObject, TrackResult, checkBackendReady, waitForBackendReady, listAllImages } from "@/lib/api";
+import { searchImages, SearchResult, getVideoFrames, VideoFrame, trackObject, TrackResult, checkBackendReady, waitForBackendReady, listAllImages } from "@/lib/api";
 
 const RECENT_KEY = "overwatch:recent";
 const FALLBACK_RECENTS = [
@@ -60,9 +60,6 @@ export default function Home() {
                     .catch(() => { if (!cancelled) setBackendReady(false); });
             }
         });
-        // Fire-and-forget Gemini warmup so the first real query doesn't pay cold-start latency.
-        parseQuery("warmup").catch(() => {});
-        vlmRerank("warmup", [{ photo_id: "warm", photo_image_url: "https://aariz-s-segp-siglip-search.hf.space/images/mario-scheibl-ySYhgecW59E-unsplash_1776956370.jpg" }]).catch(() => {});
         return () => { cancelled = true; };
     }, []);
 
@@ -228,55 +225,9 @@ export default function Home() {
         const t0 = performance.now();
         try {
             const threshold = minSimilarity * SLIDER_MAX_THRESHOLD;
-            const { plan } = await parseQuery(query);
-            // First positive clause's bare object is our OWL-ViT detection target.
-            // Falls back to the full query if parse produced nothing useful.
-            const firstPositive = plan.clauses.find(c => !c.negated);
-            setDetectionPhrase(firstPositive?.object?.trim() || query.trim());
-            const isStructured =
-                plan.mode !== 'SINGLE'
-                || plan.clauses.some(c => c.negated)
-                || plan.clauses.some(c => c.attributes && c.attributes.length > 0);
-            const raw = isStructured
-                ? await searchComplex(plan, resultCount, threshold)
-                : await searchImages(query, resultCount, threshold);
-
-            // VLM re-rank the top candidates with Gemini — this is the real
-            // action-understanding layer. SigLIP+OWL-ViT find candidates by
-            // object presence; Gemini decides whether the image actually
-            // depicts what the query describes.
-            const RERANK_TOP = 8;
-            const head = raw.slice(0, RERANK_TOP);
-            const tail = raw.slice(RERANK_TOP);
-
-            let finalResults: SearchResult[] = raw;
-            if (head.length > 0) {
-                const scored = await vlmRerank(
-                    query,
-                    head.map(r => ({ photo_id: r.photo_id, photo_image_url: r.photo_image_url }))
-                );
-                const scoreMap = new Map(scored.map(s => [s.photo_id, s]));
-                const rescored = head.map(r => {
-                    const s = scoreMap.get(r.photo_id);
-                    if (s && typeof s.vlm_score === 'number') {
-                        return { ...r, score: s.vlm_score };
-                    }
-                    return r;
-                });
-                // Re-apply threshold only to items VLM actually scored. Items where VLM
-                // errored (vlm_score null) keep the backend score, which already passed
-                // the backend threshold. Tail items (beyond top-8) were backend-filtered
-                // and should be trusted.
-                const filtered = rescored.filter(r => {
-                    const s = scoreMap.get(r.photo_id);
-                    if (s && typeof s.vlm_score === 'number') {
-                        return (r.score ?? 0) >= threshold;
-                    }
-                    return true;
-                });
-                filtered.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-                finalResults = [...filtered, ...tail];
-            }
+            
+            // Replaced Gemini parseQuery/vlmRerank with direct local SigLIP search
+            const finalResults = await searchImages(query, resultCount, threshold);
 
             setResults(finalResults);
             setHasSearched(true);

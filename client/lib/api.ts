@@ -87,61 +87,6 @@ export async function searchImages(query: string, k: number = 20, threshold: num
     return res.json();
 }
 
-export interface SearchClause {
-    object: string;
-    attributes: string[];
-    negated: boolean;
-}
-
-export interface SearchPlan {
-    mode: 'AND' | 'OR' | 'SINGLE';
-    clauses: SearchClause[];
-}
-
-export async function parseQuery(query: string): Promise<{ plan: SearchPlan; fallback?: string }> {
-    const res = await fetch('/api/parse-query', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query }),
-    });
-    if (!res.ok) {
-        return { plan: { mode: 'SINGLE', clauses: [{ object: query, attributes: [], negated: false }] }, fallback: 'http-error' };
-    }
-    return res.json();
-}
-
-export async function searchComplex(plan: SearchPlan, k: number = 20, threshold: number = 0.20): Promise<SearchResult[]> {
-    const res = await fetch(`${API_BASE}/search/complex`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan, k, threshold }),
-    });
-    if (!res.ok) throw new Error('Complex search failed');
-    return res.json();
-}
-
-export interface VlmScored {
-    photo_id: string;
-    photo_image_url: string;
-    vlm_score: number | null;
-    vlm_matches?: boolean;
-    vlm_reason?: string;
-}
-
-export async function vlmRerank(query: string, candidates: { photo_id: string; photo_image_url: string }[]): Promise<VlmScored[]> {
-    const res = await fetch('/api/vlm-rerank', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, candidates }),
-    });
-    if (!res.ok) {
-        // Fail-open: return candidates with null scores so caller can fall back to original order.
-        return candidates.map(c => ({ ...c, vlm_score: null, vlm_reason: 'http-error' }));
-    }
-    const data = await res.json();
-    return data.scored as VlmScored[];
-}
-
 export async function uploadImage(file: File) {
     const formData = new FormData();
     formData.append('file', file);

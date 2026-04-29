@@ -8,34 +8,6 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict
 from app.services.search_service import search_service
 
-# Demo-mode clause cache: phrase -> (expires_at, rows). 60s TTL, keyed on the
-# exact search phrase we pass to search_service so repeat clauses across
-# queries ("white van", then "white van and road") reuse the OWL-ViT work.
-_CLAUSE_CACHE: "OrderedDict[str, tuple[float, list[dict]]]" = OrderedDict()
-_CLAUSE_CACHE_MAX = 64
-_CLAUSE_CACHE_TTL = 60.0
-_CLAUSE_POOL = ThreadPoolExecutor(max_workers=4)
-
-
-def _cache_get(key: str):
-    now = time.time()
-    entry = _CLAUSE_CACHE.get(key)
-    if not entry:
-        return None
-    expires, rows = entry
-    if expires < now:
-        _CLAUSE_CACHE.pop(key, None)
-        return None
-    _CLAUSE_CACHE.move_to_end(key)
-    return rows
-
-
-def _cache_put(key: str, rows: list[dict]):
-    _CLAUSE_CACHE[key] = (time.time() + _CLAUSE_CACHE_TTL, rows)
-    _CLAUSE_CACHE.move_to_end(key)
-    while len(_CLAUSE_CACHE) > _CLAUSE_CACHE_MAX:
-        _CLAUSE_CACHE.popitem(last=False)
-
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 router = APIRouter()
@@ -44,20 +16,6 @@ class SearchRequest(BaseModel):
     query: str
     k: Optional[int] = 20
     threshold: Optional[float] = 0.20  # Min Similarity (0.0 - 1.0)
-
-class SearchClause(BaseModel):
-    object: str
-    attributes: List[str] = []
-    negated: bool = False
-
-class SearchPlan(BaseModel):
-    mode: str  # "AND" | "OR" | "SINGLE"
-    clauses: List[SearchClause]
-
-class ComplexSearchRequest(BaseModel):
-    plan: SearchPlan
-    k: Optional[int] = 20
-    threshold: Optional[float] = 0.20
 
 class SearchResult(BaseModel):
     photo_id: str
@@ -165,118 +123,6 @@ def _row_to_result(r: dict) -> dict:
         "description": r.get("description", ""),
         "score": float(r.get("similarity_score", 0.0)),
     }
-
-
-@router.post("/search/complex", response_model=List[SearchResult])
-def search_complex(req: ComplexSearchRequest):
-    """Compositional search: runs existing SigLIP+OWL-ViT per clause, combines via set operations.
-
-    mode=SINGLE  -> identical to /search on clause[0].object
-    mode=OR      -> union of per-clause frame sets, score = max across clauses
-    mode=AND     -> intersection of per-clause frame sets, score = min across clauses
-    Negated clauses (any mode) subtract their frame set from the final result.
-    """
-    try:
-        mode = (req.plan.mode or "SINGLE").upper()
-        positive = [c for c in req.plan.clauses if not c.negated]
-        negative = [c for c in req.plan.clauses if c.negated]
-
-        if not positive:
-            return []
-
-        # Fetch wider per-clause so intersections have room. We filter by threshold at the end.
-        per_clause_k = max(req.k * 2, 20)
-
-        def _phrase(c: SearchClause) -> str:
-            if c.attributes:
-                return f"{' '.join(c.attributes)} {c.object}".strip()
-            return c.object
-
-        def _run_clause(c: SearchClause, is_negative: bool = False) -> list[dict]:
-            phrase = _phrase(c)
-            has_attrs = bool(c.attributes)
-            
-            # Construct pre-filter for DataFusion fast metadata search
-            filters = [f"objects_json LIKE '%{c.object.lower()}%'"]
-            for attr in c.attributes:
-                # We split attributes to catch individual words if needed, 
-                # but for Florence-2 captions, whole phrase LIKE is often better.
-                filters.append(f"objects_json LIKE '%{attr.lower()}%'")
-            pre_filter = " AND ".join(filters)
-
-            # Demo-mode tuning: top-3 @ 512px for attribute clauses (half the OWL-ViT cost),
-            # top-5 @ 512px otherwise. Image detection down from 768->512 is ~2x speedup.
-            cache_key = f"{phrase}|attr={int(has_attrs)}"
-            cached = _cache_get(cache_key)
-            if cached is not None:
-                return cached
-            rows = search_service.search(
-                phrase,
-                per_clause_k,
-                threshold=0.0,
-                pre_filter=pre_filter,
-            )
-            _cache_put(cache_key, rows)
-            return rows
-
-        # Run every clause (positive + negative) in parallel. On 2-vCPU this
-        # still helps: LanceDB I/O + torch GIL releases during OWL-ViT forward
-        # passes give real overlap.
-        pos_futures = [_CLAUSE_POOL.submit(_run_clause, c) for c in positive]
-        neg_futures = [_CLAUSE_POOL.submit(_run_clause, c, True) for c in negative]
-        positive_results: list[dict[str, dict]] = [
-            {r["photo_id"]: r for r in f.result()} for f in pos_futures
-        ]
-
-        negative_ids: set[str] = set()
-        for f in neg_futures:
-            rows = f.result()
-            # A frame "contains" the negated object if its clause score is meaningful.
-            # Use 0.15 as the presence bar — below this the detector wasn't confident enough.
-            for r in rows:
-                if float(r.get("similarity_score", 0.0)) >= 0.15:
-                    negative_ids.add(r["photo_id"])
-
-        if mode == "SINGLE" or len(positive) == 1:
-            combined = positive_results[0]
-        elif mode == "OR":
-            combined = {}
-            for per in positive_results:
-                for pid, row in per.items():
-                    prev = combined.get(pid)
-                    if prev is None or float(row.get("similarity_score", 0)) > float(prev.get("similarity_score", 0)):
-                        combined[pid] = row
-        elif mode == "AND":
-            common_ids = set(positive_results[0].keys())
-            for per in positive_results[1:]:
-                common_ids &= set(per.keys())
-            combined = {}
-            for pid in common_ids:
-                # Score = min (weakest-link); carry the row with the min score for metadata.
-                rows = [per[pid] for per in positive_results]
-                min_row = min(rows, key=lambda r: float(r.get("similarity_score", 0.0)))
-                combined[pid] = min_row
-        else:
-            combined = positive_results[0]
-
-        # Subtract negated frames.
-        for pid in list(combined.keys()):
-            if pid in negative_ids:
-                combined.pop(pid, None)
-
-        # Threshold + sort + cap.
-        thr = float(req.threshold or 0.0)
-        ordered = [
-            row for row in combined.values()
-            if float(row.get("similarity_score", 0.0)) >= thr
-        ]
-        ordered.sort(key=lambda r: float(r.get("similarity_score", 0.0)), reverse=True)
-        ordered = ordered[: req.k]
-
-        return [_row_to_result(r) for r in ordered]
-    except Exception as e:
-        print(f"Complex search error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/search", response_model=List[SearchResult])

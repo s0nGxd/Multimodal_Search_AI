@@ -189,6 +189,10 @@ class SearchService:
             scaled = (raw_sim - SIM_FLOOR) / (SIM_CEIL - SIM_FLOOR)
             return max(0.0, min(1.0, scaled))
 
+        # Define stop words to ignore when extracting significant search keywords
+        STOP_WORDS = {"a", "an", "the", "photo", "of", "image", "shows", "is", "in", "on", "at", "with", "and"}
+        q_words = [w for w in query.lower().strip().split() if w not in STOP_WORDS and len(w) > 1]
+
         sorted_pids = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)
 
         seen_videos = set()
@@ -206,6 +210,19 @@ class SearchService:
 
             # Base score from SigLIP (cross-modal similarity, rescaled to 0..1)
             final_sim = rescale_dist(dist)
+            
+            # Local Metadata Boost: We verify the search keywords against the 
+            # pre-computed Florence-2 text stored in the database.
+            obj_text = row.get("objects_json", "[]").lower()
+            
+            # Check if all significant keywords match (autonomous local confirmation)
+            matches_metadata = all(word in obj_text for word in q_words) if q_words else False
+            
+            # Apply confidence boost if either the strict SQL pre-filter matched 
+            # or our local keyword check confirmed the object/attributes.
+            if pre_filter or matches_metadata:
+                final_sim += (1.0 - final_sim) * 0.85
+
             final_sim = min(0.999, final_sim)
 
             if final_sim < threshold:
