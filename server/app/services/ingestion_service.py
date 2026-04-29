@@ -158,7 +158,7 @@ class IngestionService:
         from sahi import AutoDetectionModel
         from sahi.predict import get_sliced_prediction
         
-        yolo_model = YOLO("yolov8n.pt")
+        yolo_model = YOLO("yolov8m.pt")
         detection_model = AutoDetectionModel.from_pretrained(
             model_type="yolov8",
             model=yolo_model,

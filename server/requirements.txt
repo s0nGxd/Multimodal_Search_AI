@@ -35,3 +35,4 @@ sentencepiece
 opencv-contrib-python-headless>=4.9.0
 protobuf
 norfair
+sentence-transformers

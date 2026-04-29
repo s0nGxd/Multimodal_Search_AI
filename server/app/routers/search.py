@@ -214,75 +214,45 @@ def track_object(req: TrackRequest):
                 print(f"DEBUG: No pre-computed frame found for {req.video_url} near {req.timestamp}s")
             return TrackResponse(tracks=[])
 
-        # 2. Fuzzy Matching & Scoring
+        # 2. Semantic Matching & Scoring
         print(f"DEBUG: Tracking Lookup [{source_label}] for query: \"{req.query}\"")
-        import re
         tracks = []
-        q_words = req.query.lower().strip().split()
         
-        # Mapping common user synonyms to YOLO base classes for Step 1 filtering
-        class_map = {
-            "car": ["car", "vehicle", "automobile", "auto", "cars", "vehicles"],
-            "truck": ["truck", "trucks", "pickup", "van", "vans", "trailer", "lorry"],
-            "bus": ["bus", "buses", "coach", "shuttle"],
-            "motorcycle": ["motorcycle", "motorcycles", "bike", "bikes", "scooter"],
-            "bicycle": ["bicycle", "bicycles", "bike", "bikes", "cyclist"],
-            "person": ["person", "people", "man", "woman", "men", "women", "boy", "girl", "pedestrian", "human"],
-            "dog": ["dog", "dogs", "hound", "puppy", "canine"],
-            "cat": ["cat", "cats", "kitten", "feline"],
-            "horse": ["horse", "horses", "pony", "equine"],
-            "sheep": ["sheep", "lamb"],
-            "cow": ["cow", "cows", "cattle", "bull"]
-        }
+        # Define some strict keywords to prevent over-generalization (Colors & Objects)
+        STRICT_KEYWORDS = {"red", "blue", "green", "yellow", "black", "white", "grey", "gray", "brown", "person", "man", "woman", "car", "dog", "cat", "truck", "bus", "suv", "van"}
+        q_words = [w for w in req.query.lower().strip().split() if w in STRICT_KEYWORDS]
 
-        # Inverse map to quickly check if a word is an object class
-        term_to_class = {term: cls for cls, terms in class_map.items() for term in terms}
-        
         for idx, o in enumerate(objs):
             cls_name = o["class_name"].lower()
             attrs = o.get("attributes", "").lower()
             text_to_search = f"{cls_name} {attrs}"
             
-            # --- STEP 1: Strict YOLO Class Filter ---
-            # If the user mentioned any object class in their query, 
-            # this specific object MUST match at least one of those classes.
-            user_requested_classes = set()
-            for word in q_words:
-                if word in term_to_class:
-                    user_requested_classes.add(term_to_class[word])
+            # 1. Semantic Similarity Check
+            sem_score = search_service.semantic_match(req.query, attrs)
             
-            if user_requested_classes:
-                # Does the YOLO class of this object match any class the user asked for?
-                # e.g., if user said "car", and YOLO said "car", they match.
-                # if user said "car", and YOLO said "truck", we check synonyms.
-                if cls_name not in user_requested_classes:
-                    # Check if this YOLO class has synonyms that the user might have used
-                    continue # Strict discard as requested: YOLO class identification must match
-            
-            # --- STEP 2: Double Confirmation (Object + Attributes) ---
-            # Every single word in the user query must be present as a full word 
-            # in the Florence-2 description. This double-confirms the object 
-            # identity and its attributes independently of YOLO.
-            all_matched = True
+            # 2. Strict Keyword Sanity Check (Prevention of color-swapping or class-swapping)
+            # If the user asked for "red", the word "red" must be in the text.
+            # If the user asked for "car", the word "car" (or synonym) must be in the text.
+            passes_strict = True
             for word in q_words:
-                if not re.search(rf"\b{re.escape(word)}\b", attrs):
-                    all_matched = False
+                if word not in text_to_search:
+                    passes_strict = False
                     break
             
-            if all_matched:
-                # If we passed both steps, it's a confirmed match.
-                # Use the original object score.
-                print(f"    - Match! Object {idx}: [{o['class_name']}] Confirmed via Step 2 | Text: {attrs[:60]}...")
+            # Threshold 0.55 + Strict check ensures high-quality matches
+            if sem_score > 0.55 and passes_strict:
+                print(f"    - Match! Object {idx}: [{o['class_name']}] Semantic Score: {sem_score:.2f} | Text: {attrs[:60]}...")
                 
                 tracks.append({
                     "track_id": idx,
                     "bbox": o["bbox"],
-                    "score": float(o.get("score", 1.0))
+                    "score": float(o.get("score", 1.0)) * sem_score
                 })
 
-        # Sort by confidence/match relevance and return
+        # Sort by relevance and return
         if tracks:
-            print(f"DEBUG: Returning {len(tracks)} strict matches")
+            tracks.sort(key=lambda x: x["score"], reverse=True)
+            print(f"DEBUG: Returning {len(tracks)} semantic matches")
             return TrackResponse(tracks=tracks)
 
         return TrackResponse(tracks=[])

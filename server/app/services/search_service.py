@@ -7,6 +7,7 @@ import pandas as pd
 from transformers import AutoModel, AutoProcessor
 from PIL import Image
 from typing import Optional
+from sentence_transformers import SentenceTransformer, util
 
 class SearchService:
     _instance = None
@@ -30,6 +31,10 @@ class SearchService:
         self.model = None
         self.processor = None
         self.load_model()
+
+        # Local Semantic Model (Small, fast, CPU-bound)
+        print("Loading local semantic text model: all-MiniLM-L6-v2")
+        self.semantic_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
 
         # Connect to DB
         self.db = lancedb.connect(self.db_uri)
@@ -67,6 +72,20 @@ class SearchService:
             if self.table is not None:
                 print(f"Warning: Database table 'images' appears corrupted or missing: {e}")
             self.table = None
+
+    def semantic_match(self, query: str, text: str) -> float:
+        """Calculates semantic similarity between a query and an object description."""
+        if not query.strip() or not text.strip() or text == "[]":
+            return 0.0
+        try:
+            # We compare the query meaning against the description meaning
+            emb1 = self.semantic_model.encode(query, convert_to_tensor=True)
+            emb2 = self.semantic_model.encode(text, convert_to_tensor=True)
+            cosine_score = util.cos_sim(emb1, emb2)
+            return float(cosine_score.item())
+        except Exception as e:
+            print(f"Semantic match error: {e}")
+            return 0.0
 
     @torch.no_grad()
     def embed_text(self, text: str) -> np.ndarray:
@@ -189,10 +208,6 @@ class SearchService:
             scaled = (raw_sim - SIM_FLOOR) / (SIM_CEIL - SIM_FLOOR)
             return max(0.0, min(1.0, scaled))
 
-        # Define stop words to ignore when extracting significant search keywords
-        STOP_WORDS = {"a", "an", "the", "photo", "of", "image", "shows", "is", "in", "on", "at", "with", "and"}
-        q_words = [w for w in query.lower().strip().split() if w not in STOP_WORDS and len(w) > 1]
-
         sorted_pids = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)
 
         seen_videos = set()
@@ -211,15 +226,17 @@ class SearchService:
             # Base score from SigLIP (cross-modal similarity, rescaled to 0..1)
             final_sim = rescale_dist(dist)
             
-            # Local Metadata Boost: We verify the search keywords against the 
+            # Local Semantic Boost: We compare the query meaning against the 
             # pre-computed Florence-2 text stored in the database.
             obj_text = row.get("objects_json", "[]").lower()
             
-            # Check if all significant keywords match (autonomous local confirmation)
-            matches_metadata = all(word in obj_text for word in q_words) if q_words else False
+            # Use local semantic similarity (meaning-based) instead of literal keyword match
+            # Threshold 0.45 is usually enough for a semantic match on short queries
+            sem_score = self.semantic_match(query, obj_text)
+            matches_metadata = (sem_score > 0.45)
             
             # Apply confidence boost if either the strict SQL pre-filter matched 
-            # or our local keyword check confirmed the object/attributes.
+            # or our semantic model confirmed the intent.
             if pre_filter or matches_metadata:
                 final_sim += (1.0 - final_sim) * 0.85
 
