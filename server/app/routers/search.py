@@ -315,6 +315,7 @@ class TrackRequest(BaseModel):
     base64_image: str = None
     query: str
     video_id: Optional[str] = None
+    timestamp: Optional[float] = None
 
 class TrackResponse(BaseModel):
     tracks: List[Dict] = [] 
@@ -323,36 +324,91 @@ class TrackResponse(BaseModel):
 def track_object(req: TrackRequest):
     try:
         import json
+        import numpy as np
         
-        # Try to fetch pre-computed objects from LanceDB
+        # 1. Determine which frame to look up
+        objs = []
+        source_label = ""
+        
         if search_service.table is not None:
-            url = req.photo_image_url
-            if "/images/" in url:
-                url_path = f"/images/{url.split('/images/')[-1]}"
-                df = search_service.table.to_pandas()
-                match = df[df["photo_image_url"] == url_path]
-                if not match.empty:
-                    objs_json = match.iloc[0].get("objects_json", "[]")
-                    objs = json.loads(objs_json)
+            df = search_service.table.to_pandas()
+            match_df = pd.DataFrame()
+            
+            # Scenario A: Video Playback (lookup by video_url + closest timestamp)
+            if req.video_url and req.timestamp is not None:
+                v_url = req.video_url
+                if "/images/" in v_url:
+                    v_url = f"/images/{v_url.split('/images/')[-1]}"
+                
+                video_df = df[df["video_url"] == v_url]
+                if not video_df.empty:
+                    # Find closest timestamp within 1.5s
+                    video_df = video_df.copy()
+                    video_df["time_diff"] = (video_df["timestamp"] - req.timestamp).abs()
+                    closest = video_df.sort_values("time_diff").iloc[0]
                     
-                    tracks = []
-                    q_words = req.query.lower().strip().split()
-                    for idx, o in enumerate(objs):
-                        # Combine class and attributes for full-text search
-                        text_to_search = (o["class_name"] + " " + o.get("attributes", "")).lower()
-                        
-                        # Match only if ALL words from the query are found in the object description
-                        if all(word in text_to_search for word in q_words):
-                            tracks.append({
-                                "track_id": idx, # Use index for unique React key
-                                "bbox": o["bbox"], # [xmin, ymin, xmax, ymax] normalized
-                                "score": o.get("score", 1.0)
-                            })
-                    if tracks:
-                        print(f"DEBUG: Returning {len(tracks)} pre-computed tracks for {url_path}")
-                        return TrackResponse(tracks=tracks)
+                    if closest["time_diff"] < 1.5:
+                        objs_json = closest.get("objects_json", "[]")
+                        objs = json.loads(objs_json)
+                        source_label = f"Video {v_url} @ {closest['timestamp']:.2f}s (diff: {closest['time_diff']:.2f}s)"
+            
+            # Scenario B: Static Image or Fallback (lookup by photo_image_url)
+            if not objs:
+                url = req.photo_image_url
+                if "/images/" in url:
+                    url_path = f"/images/{url.split('/images/')[-1]}"
+                    match = df[df["photo_image_url"] == url_path]
+                    if not match.empty:
+                        objs_json = match.iloc[0].get("objects_json", "[]")
+                        objs = json.loads(objs_json)
+                        source_label = f"Static Image {url_path}"
 
-        print(f"DEBUG: No pre-computed tracks found for {req.photo_image_url}")
+        if not objs:
+            if req.video_url and req.timestamp:
+                print(f"DEBUG: No pre-computed frame found for {req.video_url} near {req.timestamp}s")
+            return TrackResponse(tracks=[])
+
+        # 2. Fuzzy Matching & Scoring
+        print(f"DEBUG: Tracking Lookup [{source_label}] for query: \"{req.query}\"")
+        import re
+        tracks = []
+        q_words = req.query.lower().strip().split()
+        
+        for idx, o in enumerate(objs):
+            cls = o["class_name"].lower()
+            attrs = o.get("attributes", "").lower()
+            text_to_search = f"{cls} {attrs}"
+            
+            # Check if ALL query words appear as whole words in the object text
+            all_matched = True
+            for word in q_words:
+                if not re.search(rf"\b{re.escape(word)}\b", text_to_search):
+                    all_matched = False
+                    break
+            
+            if all_matched:
+                # Calculate relevance score for sorting multiple matches
+                cls_match_count = sum(1 for word in q_words if re.search(rf"\b{re.escape(word)}\b", cls))
+                attr_match_count = sum(1 for word in q_words if re.search(rf"\b{re.escape(word)}\b", attrs))
+                total_score = (cls_match_count * 3) + attr_match_count
+                
+                print(f"    - Match! Object {idx}: [{o['class_name']}] Score: {total_score} | Text: {attrs[:60]}...")
+                
+                tracks.append({
+                    "track_id": idx,
+                    "bbox": o["bbox"],
+                    "score": float(o.get("score", 1.0))
+                })
+            else:
+                # Debug output for why it didn't match (optional/low volume)
+                pass
+
+        # Sort by match relevance (score) and return
+        tracks.sort(key=lambda x: x["score"], reverse=True)
+        if tracks:
+            print(f"DEBUG: Returning {len(tracks)} matches")
+            return TrackResponse(tracks=tracks)
+
         return TrackResponse(tracks=[])
     except Exception as e:
         print(f"Tracking error: {e}")

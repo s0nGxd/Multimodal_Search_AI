@@ -214,12 +214,13 @@ export async function trackObject(
     query: string,
     video_url?: string,
     video_id?: string,
-    base64_image?: string
+    base64_image?: string,
+    timestamp?: number
 ): Promise<{ tracks: TrackResult[] }> {
     const res = await fetch(`${API_BASE}/track`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ photo_image_url, video_url, query, video_id, base64_image })
+        body: JSON.stringify({ photo_image_url, video_url, query, video_id, base64_image, timestamp })
     });
     if (!res.ok) throw new Error('Tracking failed');
     return res.json();

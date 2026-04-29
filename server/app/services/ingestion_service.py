@@ -239,6 +239,7 @@ class IngestionService:
                     )
                     response = f2_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
                     obj["attributes"] = response
+                    print(f"    [Frame {i}] Detected {obj['class_name']} (conf: {obj['score']:.2f}) -> {response}")
                 
                 # Save frame image
                 if is_video:

@@ -99,11 +99,17 @@ export default function Home() {
 
             if (query && hasSearched) {
                 lastDetectTime.current = 0;
-                const detectQuery = detectionPhrase || query;
                 
                 // Both images and videos now use the stateful tracker endpoint 
                 // which returns pre-computed boxes from LanceDB.
-                trackObject(focusedImage.photo_image_url, detectQuery, focusedImage.video_url || "", focusedImage.video_url || focusedImage.photo_id)
+                trackObject(
+                    focusedImage.photo_image_url, 
+                    query, 
+                    focusedImage.video_url || "", 
+                    focusedImage.video_url || focusedImage.photo_id,
+                    undefined,
+                    focusedImage.best_timestamp || 0
+                )
                     .then(res => setBboxes(res.tracks || []))
                     .catch(console.error);
             }
@@ -146,10 +152,11 @@ export default function Home() {
                 const now = video.currentTime;
                 const result = await trackObject(
                     focusedImage.photo_image_url,
-                    detectionPhrase || query,
+                    query,
                     focusedImage.video_url,
                     videoId,
                     base64Image,
+                    now
                 );
 
                 if (cancelled) return;
